@@ -4,7 +4,7 @@ import { applyCrop } from "./crop.js";
 import { loadFile, isRawFile, formatMeta, RAW_EXTS } from "./loader.js";
 
 /* ------------------------------------------------------------------ */
-/*  EditCamp — learn RAW editing by doing                             */
+/*  EditCamp | learn RAW editing by doing                             */
 /* ------------------------------------------------------------------ */
 
 const DEFAULTS = {
