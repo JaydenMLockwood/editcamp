@@ -35,6 +35,11 @@ uniform float u_mixC[8];
 uniform float u_mixH[8];
 uniform float u_mixS[8];
 uniform float u_mixL[8];
+uniform int u_mCount;
+uniform float u_mType[6]; /* 0 radial, 1 linear */
+uniform vec4 u_mA[6];     /* radial: cx,cy,rx,ry  linear: x0,y0,x1,y1 */
+uniform vec4 u_mB[6];     /* feather, invert, lumLo, lumHi */
+uniform vec4 u_mAdj[6];   /* exposure, contrast, temperature, saturation */
 
 const vec3 LUMW = vec3(0.299, 0.587, 0.114);
 
@@ -162,6 +167,43 @@ void main() {
   c = hsv2rgb(hsv);
   c *= 1.0 + lMul * 0.5;
 
+  /* local adjustment masks (frame coordinates, so tiled export matches) */
+  vec2 gFrame = v_uv * u_frameA + u_frameB;
+  float baseLum = dot(clamp(c, 0.0, 1.0), LUMW);
+  for (int i = 0; i < 6; i++) {
+    if (i >= u_mCount) break;
+    vec4 A = u_mA[i];
+    vec4 B = u_mB[i];
+    float w;
+    if (u_mType[i] < 0.5) {
+      /* radial: soft-edged ellipse */
+      vec2 d = (gFrame - A.xy) / max(A.zw, vec2(1.0e-4));
+      float r = length(d);
+      float f = clamp(B.x, 0.02, 0.98);
+      w = 1.0 - smoothstep(1.0 - f, 1.0, r);
+    } else {
+      /* linear: full strength at start point, fading to none at end point */
+      vec2 dir = A.zw - A.xy;
+      float t = dot(gFrame - A.xy, dir) / max(dot(dir, dir), 1.0e-6);
+      w = 1.0 - smoothstep(0.0, 1.0, t);
+    }
+    if (B.y > 0.5) w = 1.0 - w;
+    /* luminance range limits */
+    float lo = B.z;
+    float hi = B.w;
+    float loT = mix(smoothstep(lo - 0.08, lo + 0.04, baseLum), 1.0, step(lo, 0.002));
+    float hiT = mix(1.0 - smoothstep(hi - 0.04, hi + 0.08, baseLum), 1.0, step(0.998, hi));
+    w *= loT * hiT;
+    if (w > 0.001) {
+      c *= pow(2.0, u_mAdj[i].x * 1.8 * w);
+      c = (c - 0.5) * (1.0 + u_mAdj[i].y * 0.8 * w) + 0.5;
+      c.r += u_mAdj[i].z * 0.12 * w;
+      c.b -= u_mAdj[i].z * 0.12 * w;
+      float lmm = dot(clamp(c, 0.0, 1.0), LUMW);
+      c = mix(vec3(lmm), c, 1.0 + u_mAdj[i].w * w);
+    }
+  }
+
   /* split toning */
   if (u_ssa > 0.004 || u_sha > 0.004) {
     float lt = dot(clamp(c, 0.0, 1.0), LUMW);
@@ -173,8 +215,7 @@ void main() {
 
   /* vignette: computed in FULL-FRAME coordinates so tiled export matches */
   if (abs(u_vig) > 0.004) {
-    vec2 gv = v_uv * u_frameA + u_frameB;
-    float vd = distance(gv, vec2(0.5)) * 1.4142;
+    float vd = distance(gFrame, vec2(0.5)) * 1.4142;
     c *= 1.0 + u_vig * 0.85 * smoothstep(0.45, 1.05, vd);
   }
 
@@ -281,6 +322,11 @@ export function createPipeline(canvas) {
     u_mixH: gl.getUniformLocation(prog, "u_mixH"),
     u_mixS: gl.getUniformLocation(prog, "u_mixS"),
     u_mixL: gl.getUniformLocation(prog, "u_mixL"),
+    u_mCount: gl.getUniformLocation(prog, "u_mCount"),
+    u_mType: gl.getUniformLocation(prog, "u_mType"),
+    u_mA: gl.getUniformLocation(prog, "u_mA"),
+    u_mB: gl.getUniformLocation(prog, "u_mB"),
+    u_mAdj: gl.getUniformLocation(prog, "u_mAdj"),
   };
   SCALARS.forEach((n) => (uniforms[n] = gl.getUniformLocation(prog, n)));
 
@@ -304,8 +350,36 @@ export function createPipeline(canvas) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
       }
     },
-    render(adj, { flip = 1, width = canvas.width, height = canvas.height, frame = null } = {}) {
+    render(adj, { flip = 1, width = canvas.width, height = canvas.height, frame = null, masks = [] } = {}) {
       const u = toUniforms(adj);
+      const MAXM = 6;
+      const count = Math.min(MAXM, masks.length);
+      const mT = new Float32Array(MAXM);
+      const mA = new Float32Array(MAXM * 4);
+      const mB = new Float32Array(MAXM * 4);
+      const mJ = new Float32Array(MAXM * 4);
+      for (let i = 0; i < count; i++) {
+        const m = masks[i];
+        mT[i] = m.type === "linear" ? 1 : 0;
+        if (m.type === "linear") {
+          mA[i * 4] = m.x0; mA[i * 4 + 1] = m.y0; mA[i * 4 + 2] = m.x1; mA[i * 4 + 3] = m.y1;
+        } else {
+          mA[i * 4] = m.cx; mA[i * 4 + 1] = m.cy; mA[i * 4 + 2] = m.rx; mA[i * 4 + 3] = m.ry;
+        }
+        mB[i * 4] = (m.feather || 50) / 100;
+        mB[i * 4 + 1] = m.invert ? 1 : 0;
+        mB[i * 4 + 2] = (m.lumLo || 0) / 100;
+        mB[i * 4 + 3] = (m.lumHi === undefined ? 100 : m.lumHi) / 100;
+        mJ[i * 4] = (m.adj.exposure || 0) / 100;
+        mJ[i * 4 + 1] = (m.adj.contrast || 0) / 100;
+        mJ[i * 4 + 2] = (m.adj.temperature || 0) / 100;
+        mJ[i * 4 + 3] = (m.adj.saturation || 0) / 100;
+      }
+      gl.uniform1i(uniforms.u_mCount, count);
+      gl.uniform1fv(uniforms.u_mType, mT);
+      gl.uniform4fv(uniforms.u_mA, mA);
+      gl.uniform4fv(uniforms.u_mB, mB);
+      gl.uniform4fv(uniforms.u_mAdj, mJ);
       gl.uniform1f(uniforms.u_flip, flip);
       gl.uniform2f(uniforms.u_texel, 1 / texW, 1 / texH);
       if (frame) {
@@ -372,7 +446,7 @@ export function resizeRGBA(src, sw, sh, maxEdge) {
 }
 
 /* Apply adjustments to a full-resolution RGBA buffer in GPU tiles. */
-export async function processFull(full, adj, { maxEdge = 0, onProgress } = {}) {
+export async function processFull(full, adj, { maxEdge = 0, onProgress, masks = [] } = {}) {
   let { data, width, height } = full;
   if (maxEdge && Math.max(width, height) > maxEdge) {
     onProgress && onProgress(0, "Resizing\u2026");
@@ -426,6 +500,7 @@ export async function processFull(full, adj, { maxEdge = 0, onProgress } = {}) {
         width: ew,
         height: eh,
         frame: { ax: ew / width, ay: eh / height, bx: x0 / width, by: y0 / height },
+        masks,
       });
       const px = readBuf.subarray(0, ew * eh * 4);
       pipe.readPixels(ew, eh, px);

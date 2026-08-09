@@ -4,7 +4,7 @@ import { applyCrop } from "./crop.js";
 import { loadFile, isRawFile, formatMeta, RAW_EXTS } from "./loader.js";
 
 /* ------------------------------------------------------------------ */
-/*  EditCamp | learn RAW editing by doing                             */
+/*  EditCamp: RAW editing made easy                             */
 /* ------------------------------------------------------------------ */
 
 const DEFAULTS = {
@@ -55,6 +55,13 @@ const SLIDERS = {
   st_hi_hue: { label: "Highlights hue", left: "", right: "", min: 0, hue: true },
   st_hi_amt: { label: "Highlights strength", left: "off", right: "strong", min: 0 },
 };
+SLIDERS.m_exposure = { label: "Exposure", left: "darker", right: "brighter", ev: true };
+SLIDERS.m_contrast = { label: "Contrast", left: "flatter", right: "punchier" };
+SLIDERS.m_temperature = { label: "Temperature", left: "cooler", right: "warmer" };
+SLIDERS.m_saturation = { label: "Saturation", left: "mute", right: "boost" };
+SLIDERS.m_feather = { label: "Feather", left: "hard edge", right: "soft edge", min: 0 };
+SLIDERS.m_lumlo = { label: "Dark limit", left: "from black", right: "midtones", min: 0 };
+SLIDERS.m_lumhi = { label: "Bright limit", left: "midtones", right: "to white", min: 0 };
 for (const [band] of MIX_BANDS) {
   SLIDERS[`mix_${band}_h`] = { label: "Hue", left: "shift −", right: "shift +" };
   SLIDERS[`mix_${band}_s`] = { label: "Saturation", left: "mute", right: "boost" };
@@ -67,18 +74,18 @@ const GUIDED_STEPS = [
     title: "White balance",
     sliders: ["temperature", "tint"],
     why: "Light has a colour, and cameras don't always guess it right. Photos taken in shade or on cloudy days come out blue-ish. Photos under indoor bulbs come out orange. Fluorescent office light sneaks in green.",
-    example: "Think of photos of friends at a restaurant — faces glowing orange from the warm lights. Or a portrait taken in the shade where skin looks slightly grey and cold. Neither is how it looked in real life. That's a white balance problem.",
-    look: "Find something in the frame that should be neutral — a white shirt, grey pavement, clouds, paper. Slide Temperature until it stops looking blue or orange and just looks white or grey. Tint fixes green or pink casts; moves there are usually tiny.",
-    hist: "White balance barely changes the graph — judge this one entirely with your eyes.",
+    example: "Think of photos of friends at a restaurant, faces glowing orange from the warm lights. Or a portrait taken in the shade where skin looks slightly grey and cold. Neither is how it looked in real life. That's a white balance problem.",
+    look: "Find something in the frame that should be neutral: a white shirt, grey pavement, clouds, paper. Slide Temperature until it stops looking blue or orange and just looks white or grey. Tint fixes green or pink casts; moves there are usually tiny.",
+    hist: "White balance barely changes the graph, so judge this one entirely with your eyes.",
     range: "Small moves. If you pass ±40 something else is probably wrong.",
   },
   {
     key: "exposure",
     title: "Exposure",
     sliders: ["exposure"],
-    why: "Exposure is the overall brightness of the whole frame. Cameras often guess wrong in tricky light, and RAW files come out a little dark and dull on purpose — they leave the decision to you.",
+    why: "Exposure is the overall brightness of the whole frame. Cameras often guess wrong in tricky light, and RAW files come out a little dark and dull on purpose. They leave the decision to you.",
     example: "The classic case: someone standing in front of a bright window or a sunset. The camera darkens everything to protect the sky, and your friend becomes a silhouette. Raising exposure brings them back.",
-    look: "Brighten or darken until the main subject — the face, the building, whatever the photo is about — reads clearly. If the sky washes out to white while you do it, ignore that: the next step recovers it.",
+    look: "Brighten or darken until the main subject reads clearly, whether that's a face, a building, or whatever the photo is about. If the sky washes out to white while you do it, ignore that: the next step recovers it.",
     hist: "Watch the whole hill slide left and right as you move the slider. Keep the bulk of it around the middle. If bars pile up against the right wall, you're pushing whites past the point where detail survives.",
     range: "Typically between −0.5 and +1 EV.",
   },
@@ -86,9 +93,9 @@ const GUIDED_STEPS = [
     key: "recover",
     title: "Recover detail",
     sliders: ["highlights", "shadows"],
-    why: "This is the RAW superpower. Bright skies and dark corners that look ruined are usually still holding detail — a phone JPEG throws that data away, but here it's recoverable.",
-    example: "Beach and mountain photos are the textbook case: the ground looks fine but the sky is a blank white sheet. Pull Highlights down and blue sky and cloud texture reappear — it was there all along. Lift Shadows and faces under hat brims or details inside dark doorways open up.",
-    look: "Drag Highlights left and watch the bright areas come back. Drag Shadows right to open the dark areas. Big moves are fine here — this pair is very forgiving.",
+    why: "This is the RAW superpower. Bright skies and dark corners that look ruined are usually still holding detail. A phone JPEG throws that data away, but here it's recoverable.",
+    example: "Beach and mountain photos are the textbook case: the ground looks fine but the sky is a blank white sheet. Pull Highlights down and blue sky and cloud texture reappear. It was there all along. Lift Shadows and faces under hat brims or details inside dark doorways open up.",
+    look: "Drag Highlights left and watch the bright areas come back. Drag Shadows right to open the dark areas. Big moves are fine here; this pair is very forgiving.",
     hist: "This step is where the graph earns its keep: the pile jammed against the right wall shrinks as you pull Highlights down, and the left edge comes away from its wall as you lift Shadows. Any clipping warnings should fade or disappear.",
     range: "Highlights −30 to −80, Shadows +20 to +60 are common.",
   },
@@ -96,22 +103,39 @@ const GUIDED_STEPS = [
     key: "contrast",
     title: "Contrast",
     sliders: ["contrast"],
-    why: "Recovering highlights and shadows squeezes everything toward the middle, which can leave the photo looking like it's behind a thin fog — technically fine, but lifeless.",
-    example: "You've seen this look in old scanned photos, or pictures taken through a dirty window — nothing is truly black, nothing truly white, everything slightly grey. Contrast clears that fog and makes the image feel solid again.",
-    look: "Nudge it up until darks feel properly dark and brights feel properly bright, then stop. Push too far and you undo the recovery you just did — skies blow out again, shadows go solid black.",
-    hist: "The hill stretches wider, spreading toward both edges — that's the goal. Stop before it starts piling into either wall again.",
+    why: "Recovering highlights and shadows squeezes everything toward the middle, which can leave the photo looking like it's behind a thin fog. Technically fine, but lifeless.",
+    example: "You've seen this look in old scanned photos, or pictures taken through a dirty window. Nothing is truly black, nothing truly white, everything slightly grey. Contrast clears that fog and makes the image feel solid again.",
+    look: "Nudge it up until darks feel properly dark and brights feel properly bright, then stop. Push too far and you undo the recovery you just did: skies blow out again, shadows go solid black.",
+    hist: "The hill stretches wider, spreading toward both edges. That's the goal. Stop before it starts piling into either wall again.",
     range: "+10 to +30 usually does it.",
   },
   {
     key: "color",
     title: "Color",
     sliders: ["vibrance", "saturation"],
-    why: "Colour intensity comes last, once the tones are right. Vibrance boosts the most muted colours while protecting ones that are already strong — especially skin. Saturation boosts everything equally, which gets ugly fast.",
-    example: "A market stall of fruit, autumn leaves, a sunset over water — Vibrance makes these sing. But push Saturation on a photo of people and skin goes orange like a bad fake tan. That's why Vibrance comes first.",
-    look: "Raise Vibrance until colours feel alive — it's hard to overdo. Add a touch of Saturation only if the photo still feels quiet. If skin tones or skies start looking radioactive, back off.",
-    hist: "Colour barely moves this graph — like white balance, trust your eyes here.",
+    why: "Colour intensity comes last, once the tones are right. Vibrance boosts the most muted colours while protecting ones that are already strong, especially skin. Saturation boosts everything equally, which gets ugly fast.",
+    example: "A market stall of fruit, autumn leaves, a sunset over water: Vibrance makes these sing. But push Saturation on a photo of people and skin goes orange like a bad fake tan. That's why Vibrance comes first.",
+    look: "Raise Vibrance until colours feel alive; it's hard to overdo. Add a touch of Saturation only if the photo still feels quiet. If skin tones or skies start looking radioactive, back off.",
+    hist: "Colour barely moves this graph. Like white balance, trust your eyes here.",
     range: "Vibrance +10 to +40, Saturation 0 to +15.",
   },
+  {
+    key: "local",
+    title: "Local adjustments",
+    sliders: [],
+    local: true,
+    why: "Every slider so far changed the whole photo at once. The final skill is changing just one part of it. Editors call this masking, and it's what separates a corrected photo from a directed one.",
+    example: "The textbook cases: a landscape where the ground is fine but the sky needs darkening, which is a job for a Linear mask dragged over the sky. Or a portrait where the face needs half a stop more light than the room, which is a Radial mask over the face.",
+    look: "Add a Linear mask, drag its points so it covers the sky, and lower its Exposure. Only the sky darkens. Or add a Radial over your subject and raise Exposure. Feather softens the edge; the luminance limits confine the effect to darker or brighter areas within the shape.",
+    hist: "Local changes move only part of the graph. A region's tones slide while the big peaks barely shift.",
+    range: "Subtle wins: ±0.3 to ±0.7 EV locally is usually plenty.",
+  },
+];
+
+const ESSENTIALS = [
+  "temperature", "tint", "exposure", "contrast",
+  "highlights", "shadows", "vibrance", "saturation",
+  "clarity", "vignette",
 ];
 
 const ACCEPT =
@@ -300,8 +324,8 @@ function Histogram({ hist, showToggle, showHelp }) {
           Every pixel in your photo gets sorted by brightness: the darkest stack up on the
           left, the brightest on the right. A tall pile pressed hard against the{" "}
           <strong>left wall</strong> means areas of solid black with no detail; against the{" "}
-          <strong>right wall</strong>, blown-out white (that's "clipping" — the warnings
-          below turn amber when it happens). There's no single correct shape — a night
+          <strong>right wall</strong>, blown-out white (that's "clipping", and the warnings
+          below turn amber when it happens). There's no single correct shape: a night
           photo should lean left, a snow scene right. But a healthy edit usually ends with a
           hill spread across most of the width, reaching toward both edges without slamming
           into them.
@@ -337,6 +361,19 @@ export default function App() {
   const [cropAngle, setCropAngle] = useState(0);
   const [cropApplied, setCropApplied] = useState(false);
   const [zoom, setZoom] = useState({ z: 1, tx: 0, ty: 0 });
+  const [masks, setMasks] = useState([]);
+  const [selMask, setSelMask] = useState(null);
+  const [autoApplied, setAutoApplied] = useState(false);
+  const [openGroups, setOpenGroups] = useState({
+    wb: true,
+    light: true,
+    color: false,
+    mixer: false,
+    split: false,
+    effects: false,
+    masking: false,
+    detail: false,
+  });
 
   const glCanvasRef = useRef(null);
   const origCanvasRef = useRef(null);
@@ -353,15 +390,20 @@ export default function App() {
   const stageInnerRef = useRef(null);
   const zoomRef = useRef({ z: 1, tx: 0, ty: 0 });
   const cropModeRef = useRef(false);
+  const masksRef = useRef([]);
+  const maskCounter = useRef(0);
+  const maskDragRef = useRef(null);
+  const autoPrevRef = useRef(null);
   const fileNameRef = useRef("photo");
 
   adjRef.current = adj;
   zoomRef.current = zoom;
   cropModeRef.current = cropMode;
+  masksRef.current = masks;
 
   const render = useCallback(() => {
     if (!pipeRef.current) return;
-    pipeRef.current.render(adjRef.current, { flip: 1 });
+    pipeRef.current.render(adjRef.current, { flip: 1, masks: masksRef.current });
   }, []);
 
   const scheduleHist = useCallback(() => {
@@ -427,7 +469,7 @@ export default function App() {
     if (!imgInfo) return;
     render();
     scheduleHist();
-  }, [adj, imgInfo, render, scheduleHist]);
+  }, [adj, masks, imgInfo, render, scheduleHist]);
 
   const refreshWorking = useCallback((full) => {
     fullRef.current = full;
@@ -449,6 +491,10 @@ export default function App() {
     setCropMode(false);
     setCropAngle(0);
     fileNameRef.current = (name || "photo").replace(/\.[^.]+$/, "");
+    setMasks([]);
+    setSelMask(null);
+    maskCounter.current = 0;
+    setAutoApplied(false);
     setMeta(full.meta || null);
     setAdj({ ...DEFAULTS });
     setStep(0);
@@ -484,8 +530,13 @@ export default function App() {
     }
   };
 
+  const toggleGroup = (g) => setOpenGroups((o) => ({ ...o, [g]: !o[g] }));
+
   const change = (k, v) => setAdj((p) => ({ ...p, [k]: v }));
-  const resetAll = () => setAdj({ ...DEFAULTS });
+  const resetAll = () => {
+    setAdj({ ...DEFAULTS });
+    setAutoApplied(false);
+  };
   const edited = Object.keys(adj).some((k) => adj[k] !== DEFAULTS[k]);
 
   /* ------------------------------ export ---------------------------- */
@@ -501,6 +552,7 @@ export default function App() {
         exportSize === "full" ? 0 : exportSize === "large" ? 3000 : 1600;
       const cv = await processFull(fullRef.current, adjRef.current, {
         maxEdge,
+        masks: masksRef.current,
         onProgress: (p, label) => {
           setProgress(p);
           setBusyMsg(label || "Processing…");
@@ -522,9 +574,10 @@ export default function App() {
       [JSON.stringify(
         {
           app: "editcamp",
-          version: 2,
+          version: 3,
           adjustments: adjRef.current,
           crop: cropParamsRef.current || null,
+          masks: masksRef.current,
         },
         null,
         2
@@ -559,10 +612,236 @@ export default function App() {
           /* crop from a different image; skip it */
         }
       }
+      if (Array.isArray(parsed.masks)) {
+        const loaded = parsed.masks.filter((m) => m && m.id && m.type && m.adj);
+        setMasks(loaded);
+        maskCounter.current = loaded.reduce((mx, m) => Math.max(mx, m.id), 0);
+        setSelMask(null);
+      }
       setExportOpen(false);
     } catch (ex) {
       setErr("Couldn't load edits: " + (ex && ex.message ? ex.message : String(ex)));
     }
+  };
+
+  /* --------------------------- auto adjust -------------------------- */
+
+  const autoAdjust = () => {
+    const p = previewRef.current;
+    if (!p) return;
+    const d = p.data;
+    const n = p.width * p.height;
+    const stride = Math.max(1, Math.floor(n / 24000)) * 4;
+    let sr = 0, sg = 0, sb = 0, sSat = 0, cnt = 0, hiC = 0, loC = 0;
+    const lums = [];
+    for (let i = 0; i < d.length; i += stride) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      sr += r; sg += g; sb += b;
+      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      lums.push(lum);
+      if (lum > 0.92) hiC++;
+      if (lum < 0.08) loC++;
+      sSat += (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
+      cnt++;
+    }
+    if (!cnt) return;
+    lums.sort((a, b) => a - b);
+    const pct = (q) => lums[Math.min(lums.length - 1, Math.floor(q * lums.length))];
+    const median = pct(0.5);
+    const spread = pct(0.95) - pct(0.05);
+    const p99 = pct(0.99);
+    const p01 = pct(0.01);
+    const avgR = sr / cnt, avgG = sg / cnt, avgB = sb / cnt;
+    const clampV = (v, lo, hi) => Math.round(Math.max(lo, Math.min(hi, v)));
+
+    /* gray-world white balance, at reduced strength so legitimately warm or
+       cool scenes (sunsets, ocean) don't get neutralised into dullness */
+    const temp = clampV((((avgB - avgR) / 255 / 2) / 0.12) * 100 * 0.6, -25, 25);
+    const tint = clampV((-((avgG - (avgR + avgB) / 2) / 255) / 0.10) * 100 * 0.5, -18, 18);
+    /* brightness toward a lively midpoint, but constrained by headroom:
+       don't brighten a dark photo so far that its bright tail (p99) clips,
+       and don't darken a bright photo so far that its dark tail (p01)
+       crushes. A small grace margin is allowed because the recovery sliders
+       below can pull a little back. */
+    const desiredEv = Math.log2(0.48 / Math.max(0.03, median));
+    const evMax = Math.log2(0.985 / Math.max(p99, 0.05)) + 0.15;
+    const evMin = Math.log2(0.03 / Math.max(p01, 0.004)) - 0.15;
+    let ev = desiredEv;
+    if (ev > evMax) ev = evMax;
+    if (ev < evMin && evMin < evMax) ev = evMin;
+    ev = Math.max(-0.9, Math.min(1.3, ev));
+    const exposure = clampV((ev / 1.8) * 100, -50, 75);
+    /* always add some punch; more when the tonal range is flat */
+    const contrast = clampV(8 + (0.82 - spread) * 140, 6, 40);
+    /* recovery is computed from the PREDICTED post-exposure image, so a
+       brightened dark photo gets its new bright clipping recovered, and a
+       darkened bright photo gets its new shadow crush lifted */
+    const scale = Math.pow(2, ev);
+    let postHi = 0;
+    let postLo = 0;
+    for (let i = 0; i < lums.length; i++) {
+      const l = lums[i] * scale;
+      if (l > 0.92) postHi++;
+      if (l < 0.08) postLo++;
+    }
+    postHi = (postHi / lums.length) * 100;
+    postLo = (postLo / lums.length) * 100;
+    const highlights = postHi > 1.2 ? -clampV(12 + postHi * 4, 12, 55) : 0;
+    const shadows = postLo > 1.5 ? clampV(10 + postLo * 4, 10, 45) : 0;
+    /* deepen blacks slightly when nothing is crushing, for solidity */
+    const blacks = postLo < 1 ? -8 : 0;
+    /* always wake the colour up a little; more when it's muted */
+    const meanSat = sSat / cnt;
+    const vibrance = clampV(12 + (0.20 - meanSat) * 160, 10, 35);
+
+    autoPrevRef.current = { ...adjRef.current };
+    setAdj((prev) => ({
+      ...prev,
+      temperature: temp,
+      tint,
+      exposure,
+      contrast,
+      highlights,
+      shadows,
+      blacks,
+      vibrance,
+    }));
+    setAutoApplied(true);
+  };
+
+  const revertAuto = () => {
+    if (autoPrevRef.current) setAdj(autoPrevRef.current);
+    setAutoApplied(false);
+  };
+
+  /* ------------------------------ masks ----------------------------- */
+
+  const addMask = (type) => {
+    if (masksRef.current.length >= 6) return;
+    maskCounter.current += 1;
+    const id = maskCounter.current;
+    const base = {
+      id,
+      type,
+      invert: false,
+      feather: 50,
+      lumLo: 0,
+      lumHi: 100,
+      adj: { exposure: -40, contrast: 0, temperature: 0, saturation: 0 },
+    };
+    const m =
+      type === "radial"
+        ? { ...base, cx: 0.5, cy: 0.5, rx: 0.25, ry: 0.2 }
+        : { ...base, x0: 0.5, y0: 0.1, x1: 0.5, y1: 0.55 };
+    setMasks((ms) => [...ms, m]);
+    setSelMask(id);
+  };
+
+  const updMask = (id, patch) =>
+    setMasks((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+
+  const updMaskAdj = (id, k, v) =>
+    setMasks((ms) => ms.map((m) => (m.id === id ? { ...m, adj: { ...m.adj, [k]: v } } : m)));
+
+  const delMask = (id) => {
+    setMasks((ms) => ms.filter((m) => m.id !== id));
+    setSelMask((s) => (s === id ? null : s));
+  };
+
+  const startMaskDrag = (kind) => (e) => {
+    const m = masksRef.current.find((x) => x.id === selMask);
+    if (!m || !wrapRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = wrapRef.current.getBoundingClientRect();
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const snap = { ...m };
+    const cl = (v) => Math.max(0, Math.min(1, v));
+    const move = (ev) => {
+      const fx = (ev.clientX - r.left) / r.width;
+      const fy = (ev.clientY - r.top) / r.height;
+      const dx = (ev.clientX - sx) / r.width;
+      const dy = (ev.clientY - sy) / r.height;
+      if (kind === "c") {
+        if (snap.type === "radial") {
+          updMask(m.id, { cx: cl(snap.cx + dx), cy: cl(snap.cy + dy) });
+        } else {
+          updMask(m.id, {
+            x0: cl(snap.x0 + dx),
+            y0: cl(snap.y0 + dy),
+            x1: cl(snap.x1 + dx),
+            y1: cl(snap.y1 + dy),
+          });
+        }
+      } else if (kind === "e") {
+        updMask(m.id, { rx: Math.max(0.02, Math.abs(fx - snap.cx)) });
+      } else if (kind === "s") {
+        updMask(m.id, { ry: Math.max(0.02, Math.abs(fy - snap.cy)) });
+      } else if (kind === "p0") {
+        updMask(m.id, { x0: cl(fx), y0: cl(fy) });
+      } else if (kind === "p1") {
+        updMask(m.id, { x1: cl(fx), y1: cl(fy) });
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const renderMaskPanel = () => {
+    const sel = masks.find((m) => m.id === selMask);
+    return (
+      <div className="mask-panel">
+        <div className="mask-add">
+          <button className="btn small" onClick={() => addMask("radial")} disabled={masks.length >= 6}>
+            + Radial
+          </button>
+          <button className="btn small" onClick={() => addMask("linear")} disabled={masks.length >= 6}>
+            + Linear
+          </button>
+        </div>
+        {masks.length > 0 && (
+          <div className="mask-list">
+            {masks.map((m, i) => (
+              <div key={m.id} className={"mask-row" + (m.id === selMask ? " on" : "")}>
+                <button
+                  className="mask-name"
+                  onClick={() => setSelMask(m.id === selMask ? null : m.id)}
+                >
+                  {m.type === "radial" ? "Radial" : "Linear"} {i + 1}
+                </button>
+                <button className="mask-del" onClick={() => delMask(m.id)} aria-label="Delete mask">
+                  {"×"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {sel && (
+          <div className="mask-ctrls">
+            <Slider k="m_exposure" value={sel.adj.exposure} onChange={(k, v) => updMaskAdj(sel.id, "exposure", v)} />
+            <Slider k="m_contrast" value={sel.adj.contrast} onChange={(k, v) => updMaskAdj(sel.id, "contrast", v)} />
+            <Slider k="m_temperature" value={sel.adj.temperature} onChange={(k, v) => updMaskAdj(sel.id, "temperature", v)} />
+            <Slider k="m_saturation" value={sel.adj.saturation} onChange={(k, v) => updMaskAdj(sel.id, "saturation", v)} />
+            {sel.type === "radial" && (
+              <Slider k="m_feather" value={sel.feather} onChange={(k, v) => updMask(sel.id, { feather: v })} />
+            )}
+            <Slider k="m_lumlo" value={sel.lumLo} onChange={(k, v) => updMask(sel.id, { lumLo: v })} />
+            <Slider k="m_lumhi" value={sel.lumHi} onChange={(k, v) => updMask(sel.id, { lumHi: v })} />
+            <button
+              className={"btn small" + (sel.invert ? " active" : "")}
+              onClick={() => updMask(sel.id, { invert: !sel.invert })}
+            >
+              Invert mask
+            </button>
+          </div>
+        )}
+      </div>
+    );
   };
 
   /* ------------------------------ zoom ------------------------------ */
@@ -668,6 +947,8 @@ export default function App() {
     if (originalRef.current) refreshWorking(originalRef.current);
     cropParamsRef.current = null;
     setCropApplied(false);
+    setMasks([]);
+    setSelMask(null);
     setCropMode(false);
   };
 
@@ -705,6 +986,8 @@ export default function App() {
         const res = applyCrop(originalRef.current, params.angleRad, params.Pc, params.cw, params.ch);
         cropParamsRef.current = params;
         setCropApplied(true);
+        setMasks([]);
+        setSelMask(null);
         refreshWorking(res);
       } catch (ex) {
         setErr("Crop failed: " + (ex && ex.message ? ex.message : String(ex)));
@@ -916,7 +1199,7 @@ export default function App() {
           <div className="empty-card">
             <h1>Develop your first photo</h1>
             <p>
-              Load a photo — including real camera RAW files — and EditCamp walks
+              Load a photo, including real camera RAW files, and EditCamp walks
               you through the editing loop that professionals use, one adjustment at a
               time, with a live before/after so you can see exactly what each move does.
             </p>
@@ -931,7 +1214,7 @@ export default function App() {
             {err && <div className="err-banner">{err}</div>}
             <p className="fine">
               Supported: Sony ARW, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG and most
-              other camera RAW formats — plus regular JPG, PNG and WebP. Everything
+              other camera RAW formats, plus regular JPG, PNG and WebP. Everything
               runs on your device; nothing is uploaded.
             </p>
           </div>
@@ -1076,6 +1359,63 @@ export default function App() {
                   </>
                 )}
                 {holding && <span className="chip chip-l">Original</span>}
+                {(() => {
+                  const m = masks.find((x) => x.id === selMask);
+                  if (!m || cropMode) return null;
+                  if (m.type === "radial") {
+                    return (
+                      <div className="mask-overlay">
+                        <div
+                          className="mask-ellipse"
+                          style={{
+                            left: `${(m.cx - m.rx) * 100}%`,
+                            top: `${(m.cy - m.ry) * 100}%`,
+                            width: `${m.rx * 2 * 100}%`,
+                            height: `${m.ry * 2 * 100}%`,
+                          }}
+                          onPointerDown={startMaskDrag("c")}
+                        />
+                        <div
+                          className="mh"
+                          style={{ left: `${(m.cx + m.rx) * 100}%`, top: `${m.cy * 100}%` }}
+                          onPointerDown={startMaskDrag("e")}
+                        />
+                        <div
+                          className="mh"
+                          style={{ left: `${m.cx * 100}%`, top: `${(m.cy + m.ry) * 100}%` }}
+                          onPointerDown={startMaskDrag("s")}
+                        />
+                        <div
+                          className="mh mc"
+                          style={{ left: `${m.cx * 100}%`, top: `${m.cy * 100}%` }}
+                          onPointerDown={startMaskDrag("c")}
+                        />
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="mask-overlay">
+                      <svg className="mask-svg">
+                        <line
+                          x1={`${m.x0 * 100}%`}
+                          y1={`${m.y0 * 100}%`}
+                          x2={`${m.x1 * 100}%`}
+                          y2={`${m.y1 * 100}%`}
+                        />
+                      </svg>
+                      <div
+                        className="mh"
+                        style={{ left: `${m.x0 * 100}%`, top: `${m.y0 * 100}%` }}
+                        onPointerDown={startMaskDrag("p0")}
+                      />
+                      <div
+                        className="mh hollow"
+                        style={{ left: `${m.x1 * 100}%`, top: `${m.y1 * 100}%` }}
+                        onPointerDown={startMaskDrag("p1")}
+                      />
+                    </div>
+                  );
+                })()}
               </div>
               {zoom.z > 1 && (
                 <button className="zoom-chip" onClick={resetZoom}>
@@ -1087,27 +1427,44 @@ export default function App() {
 
           <aside className="panel">
             <div className="tabs" role="tablist">
-              <button
-                role="tab"
-                aria-selected={tab === "guided"}
-                className={"tab" + (tab === "guided" ? " on" : "")}
-                onClick={() => setTab("guided")}
-              >
-                Guided
-              </button>
-              <button
-                role="tab"
-                aria-selected={tab === "advanced"}
-                className={"tab" + (tab === "advanced" ? " on" : "")}
-                onClick={() => setTab("advanced")}
-              >
-                Advanced
-              </button>
+              {[
+                ["guided", "Guided"],
+                ["essentials", "Essentials"],
+                ["advanced", "Advanced"],
+              ].map(([id, label]) => (
+                <button
+                  key={id}
+                  role="tab"
+                  aria-selected={tab === id}
+                  className={"tab" + (tab === id ? " on" : "")}
+                  onClick={() => setTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             <Histogram hist={hist} showToggle={tab === "advanced"} showHelp={tab === "guided"} />
 
-            {tab === "guided" ? (
+            {tab === "essentials" ? (
+              <div className="ess">
+                {autoApplied ? (
+                  <button className="btn wide auto-btn" onClick={revertAuto}>
+                    Undo auto adjust
+                  </button>
+                ) : (
+                  <button className="btn primary wide auto-btn" onClick={autoAdjust}>
+                    Auto adjust
+                  </button>
+                )}
+                {ESSENTIALS.map((k) => (
+                  <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                ))}
+                <button className="btn ghost wide" onClick={resetAll} disabled={!edited}>
+                  Reset all adjustments
+                </button>
+              </div>
+            ) : tab === "guided" ? (
               finished ? (
                 <div className="step-card">
                   <div className="eyebrow">Done</div>
@@ -1115,21 +1472,21 @@ export default function App() {
                   <p className="why">
                     Turn on <strong>Split view</strong> and drag the divider across the
                     photo, or hold the original button. If the "after" side reads clearly
-                    better — you just developed a photo.
+                    better, you just developed a photo.
                   </p>
                   <div className="exbox">
                     <span className="tip-label ex">Check the graph</span>
-                    A finished edit usually shows a hill spanning most of the width — a
-                    little of everything from near-black to near-white — without tall
+                    A finished edit usually shows a hill spanning most of the width, a
+                    little of everything from near-black to near-white, without tall
                     piles jammed against either wall, and no amber clipping warnings. The
                     graph describes your photo, it doesn't grade it: a night shot should
                     still lean left, a snow scene should lean right.
                   </div>
                   <div className="tipbox">
                     Happy with it? Hit <strong>Export</strong> in the top bar to save a
-                    full-resolution JPG. That five-step loop — white balance, exposure,
-                    recovery, contrast, color — is the same one used in Lightroom,
-                    Capture One and Darktable.
+                    full-resolution JPG. That editing loop, from white balance through
+                    to local adjustments, is the same one used in Lightroom, Capture
+                    One and Darktable.
                   </div>
                   <div className="nav">
                     <button
@@ -1176,9 +1533,11 @@ export default function App() {
                   </div>
 
                   <div className="step-sliders">
-                    {curStep.sliders.map((k) => (
-                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                    ))}
+                    {curStep.local
+                      ? renderMaskPanel()
+                      : curStep.sliders.map((k) => (
+                          <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                        ))}
                   </div>
 
                   <div className="range-chip">{curStep.range}</div>
@@ -1201,25 +1560,38 @@ export default function App() {
             ) : (
               <div className="adv">
                 <div className="group">
-                  <div className="group-title">White balance</div>
-                  {["temperature", "tint"].map((k) => (
-                    <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                  ))}
+                  <button className="group-toggle" onClick={() => toggleGroup("wb")} aria-expanded={openGroups.wb}>
+                    White balance<span className="chev">{openGroups.wb ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.wb &&
+                    ["temperature", "tint"].map((k) => (
+                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                    ))}
                 </div>
                 <div className="group">
-                  <div className="group-title">Light</div>
-                  {["exposure", "contrast", "highlights", "shadows", "whites", "blacks"].map((k) => (
-                    <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                  ))}
+                  <button className="group-toggle" onClick={() => toggleGroup("light")} aria-expanded={openGroups.light}>
+                    Light<span className="chev">{openGroups.light ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.light &&
+                    ["exposure", "contrast", "highlights", "shadows", "whites", "blacks"].map((k) => (
+                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                    ))}
                 </div>
                 <div className="group">
-                  <div className="group-title">Color</div>
-                  {["vibrance", "saturation"].map((k) => (
-                    <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                  ))}
+                  <button className="group-toggle" onClick={() => toggleGroup("color")} aria-expanded={openGroups.color}>
+                    Color<span className="chev">{openGroups.color ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.color &&
+                    ["vibrance", "saturation"].map((k) => (
+                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                    ))}
                 </div>
                 <div className="group">
-                  <div className="group-title">Color mixer</div>
+                  <button className="group-toggle" onClick={() => toggleGroup("mixer")} aria-expanded={openGroups.mixer}>
+                    Color mixer<span className="chev">{openGroups.mixer ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.mixer && (
+                    <>
                   <div className="band-chips">
                     {MIX_BANDS.map(([band, , hex]) => (
                       <button
@@ -1240,23 +1612,43 @@ export default function App() {
                       onChange={change}
                     />
                   ))}
+                    </>
+                  )}
                 </div>
                 <div className="group">
-                  <div className="group-title">Split toning</div>
-                  {["st_sh_hue", "st_sh_amt", "st_hi_hue", "st_hi_amt"].map((k) => (
-                    <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                  ))}
+                  <button className="group-toggle" onClick={() => toggleGroup("split")} aria-expanded={openGroups.split}>
+                    Split toning<span className="chev">{openGroups.split ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.split &&
+                    ["st_sh_hue", "st_sh_amt", "st_hi_hue", "st_hi_amt"].map((k) => (
+                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                    ))}
                 </div>
                 <div className="group">
-                  <div className="group-title">Effects</div>
-                  {["clarity", "dehaze", "vignette"].map((k) => (
-                    <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                  ))}
+                  <button className="group-toggle" onClick={() => toggleGroup("effects")} aria-expanded={openGroups.effects}>
+                    Effects<span className="chev">{openGroups.effects ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.effects &&
+                    ["clarity", "dehaze", "vignette"].map((k) => (
+                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                    ))}
                 </div>
                 <div className="group">
-                  <div className="group-title">Detail</div>
-                  <Slider k="sharpen" value={adj.sharpen} onChange={change} />
-                  <Slider k="noise" value={adj.noise} onChange={change} />
+                  <button className="group-toggle" onClick={() => toggleGroup("masking")} aria-expanded={openGroups.masking}>
+                    Masking<span className="chev">{openGroups.masking ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.masking && renderMaskPanel()}
+                </div>
+                <div className="group">
+                  <button className="group-toggle" onClick={() => toggleGroup("detail")} aria-expanded={openGroups.detail}>
+                    Detail<span className="chev">{openGroups.detail ? "−" : "+"}</span>
+                  </button>
+                  {openGroups.detail && (
+                    <>
+                      <Slider k="sharpen" value={adj.sharpen} onChange={change} />
+                      <Slider k="noise" value={adj.noise} onChange={change} />
+                    </>
+                  )}
                 </div>
                 <button className="btn ghost wide" onClick={resetAll} disabled={!edited}>
                   Reset all adjustments
@@ -1673,7 +2065,22 @@ input[type=range]::-moz-range-thumb {
   margin-top: -2px;
 }
 
-.group { margin-bottom: 18px; }
+.group { margin-bottom: 14px; }
+.group-toggle {
+  width: 100%;
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 6px; margin-bottom: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.group-toggle:hover { color: var(--amber); }
+.chev { font-size: 13px; color: var(--amber); }
 .group-title {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
@@ -1740,6 +2147,69 @@ input.hue::-moz-range-track {
   height: 6px; border-radius: 3px;
   background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
 }
+
+.ess { display: flex; flex-direction: column; }
+.auto-btn { margin: 0 0 16px; }
+
+.mask-panel { margin-bottom: 6px; }
+.mask-add { display: flex; gap: 8px; margin-bottom: 10px; }
+.mask-add .btn { flex: 1; }
+.mask-list { margin-bottom: 12px; }
+.mask-row {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.mask-row.on { border-color: var(--amber); background: var(--amber-soft); }
+.mask-name {
+  flex: 1; text-align: left;
+  font-family: inherit; font-size: 13px; font-weight: 500;
+  color: var(--text);
+  background: none; border: none; cursor: pointer;
+  padding: 8px 11px;
+}
+.mask-row.on .mask-name { color: var(--amber); }
+.mask-del {
+  font-size: 15px; line-height: 1;
+  color: var(--muted);
+  background: none; border: none; cursor: pointer;
+  padding: 8px 11px;
+}
+.mask-del:hover { color: #f0b3a8; }
+.mask-ctrls { padding-top: 2px; }
+.mask-ctrls > .btn { width: 100%; margin-top: 2px; }
+
+.mask-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.mask-overlay > * { pointer-events: auto; }
+.mask-ellipse {
+  position: absolute;
+  border: 1.5px dashed rgba(255,255,255,0.9);
+  border-radius: 50%;
+  cursor: move;
+  touch-action: none;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(0,0,0,0.35);
+}
+.mask-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.mask-svg line {
+  stroke: rgba(255,255,255,0.9);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 5;
+}
+.mh {
+  position: absolute;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--amber);
+  border: 2px solid #17181a;
+  transform: translate(-50%, -50%);
+  cursor: grab;
+  touch-action: none;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.5);
+}
+.mh.mc { background: #fff; }
+.mh.hollow { background: var(--panel); border-color: var(--amber); }
 
 @media (max-width: 900px) {
   .app { height: auto; min-height: 100vh; overflow: visible; }
