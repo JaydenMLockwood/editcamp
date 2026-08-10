@@ -27,6 +27,8 @@ const DEFAULTS = {
   st_sh_amt: 0,
   st_hi_hue: 15,
   st_hi_amt: 0,
+  texture: 0,
+  grain: 0,
 };
 for (const [band] of MIX_BANDS) {
   DEFAULTS[`mix_${band}_h`] = 0;
@@ -55,6 +57,9 @@ const SLIDERS = {
   st_hi_hue: { label: "Highlights hue", left: "", right: "", min: 0, hue: true },
   st_hi_amt: { label: "Highlights strength", left: "off", right: "strong", min: 0 },
 };
+SLIDERS.texture = { label: "Texture", left: "smooth", right: "detailed" };
+SLIDERS.grain = { label: "Grain", left: "off", right: "heavy", min: 0 };
+SLIDERS.m_colrange = { label: "Colour range", left: "tight", right: "loose", min: 0 };
 SLIDERS.m_exposure = { label: "Exposure", left: "darker", right: "brighter", ev: true };
 SLIDERS.m_contrast = { label: "Contrast", left: "flatter", right: "punchier" };
 SLIDERS.m_temperature = { label: "Temperature", left: "cooler", right: "warmer" };
@@ -130,6 +135,14 @@ const GUIDED_STEPS = [
     hist: "Local changes move only part of the graph. A region's tones slide while the big peaks barely shift.",
     range: "Subtle wins: ±0.3 to ±0.7 EV locally is usually plenty.",
   },
+];
+
+const PRESETS = [
+  ["Punchy", { contrast: 25, clarity: 20, vibrance: 25, blacks: -10 }],
+  ["Warm sunset", { temperature: 25, contrast: 12, vibrance: 20, st_hi_hue: 8, st_hi_amt: 25, st_sh_hue: 65, st_sh_amt: 10 }],
+  ["Moody", { exposure: -15, contrast: 20, blacks: -20, saturation: -15, clarity: 15, vignette: -30, st_sh_hue: 60, st_sh_amt: 20 }],
+  ["Faded film", { contrast: -10, blacks: 20, saturation: -20, grain: 35, st_sh_hue: 55, st_sh_amt: 15 }],
+  ["B&W", { saturation: -100, contrast: 20, clarity: 15, grain: 20 }],
 ];
 
 const ESSENTIALS = [
@@ -269,7 +282,7 @@ function Slider({ k, value, onChange }) {
   );
 }
 
-function Histogram({ hist, showToggle, showHelp }) {
+function Histogram({ hist, showToggle, showHelp, clipShow, onToggleClip }) {
   const [open, setOpen] = useState(false);
   const [logScale, setLogScale] = useState(true);
   if (!hist) return null;
@@ -281,6 +294,13 @@ function Histogram({ hist, showToggle, showHelp }) {
       <div className="hist-top">
         <span className="hist-title">Brightness of every pixel</span>
         <span className="hist-controls">
+          <button
+            className={"clip-btn" + (clipShow ? " on" : "")}
+            title="Paint blown highlights red and crushed blacks blue on the photo"
+            onClick={onToggleClip}
+          >
+            Clip
+          </button>
           {showToggle && (
             <span className="seg tiny">
               <button
@@ -364,6 +384,10 @@ export default function App() {
   const [masks, setMasks] = useState([]);
   const [selMask, setSelMask] = useState(null);
   const [autoApplied, setAutoApplied] = useState(false);
+  const [pickerMode, setPickerMode] = useState(null); /* null | 'wb' | 'maskcolor' */
+  const [clipShow, setClipShow] = useState(false);
+  const [cropAspect, setCropAspect] = useState(null);
+  const [hasPrevEdit, setHasPrevEdit] = useState(false);
   const [openGroups, setOpenGroups] = useState({
     wb: true,
     light: true,
@@ -394,12 +418,21 @@ export default function App() {
   const maskCounter = useRef(0);
   const maskDragRef = useRef(null);
   const autoPrevRef = useRef(null);
+  const pickerModeRef = useRef(null);
+  const clipShowRef = useRef(false);
+  const cropAspectRef = useRef(null);
+  const prevEditRef = useRef(null);
+  const clipCanvasRef = useRef(null);
+  const clipWorkRef = useRef(null);
   const fileNameRef = useRef("photo");
 
   adjRef.current = adj;
   zoomRef.current = zoom;
   cropModeRef.current = cropMode;
   masksRef.current = masks;
+  pickerModeRef.current = pickerMode;
+  clipShowRef.current = clipShow;
+  cropAspectRef.current = cropAspect;
 
   const render = useCallback(() => {
     if (!pipeRef.current) return;
@@ -429,6 +462,35 @@ export default function App() {
           if (lum >= 252) hi++;
         }
         setHist({ bins, lo: (lo / n) * 100, hi: (hi / n) * 100 });
+
+        /* clipping overlay: paint blown highlights red, crushed blacks blue */
+        const cc = clipCanvasRef.current;
+        if (cc && clipShowRef.current) {
+          const w = glc.width;
+          const h = glc.height;
+          if (!clipWorkRef.current || clipWorkRef.current.width !== w || clipWorkRef.current.height !== h) {
+            clipWorkRef.current = document.createElement("canvas");
+            clipWorkRef.current.width = w;
+            clipWorkRef.current.height = h;
+          }
+          const wx = clipWorkRef.current.getContext("2d");
+          wx.drawImage(glc, 0, 0);
+          const img = wx.getImageData(0, 0, w, h);
+          const px = img.data;
+          for (let i = 0; i < px.length; i += 4) {
+            const r = px[i], g = px[i + 1], b = px[i + 2];
+            if (r > 250 && g > 250 && b > 250) {
+              px[i] = 255; px[i + 1] = 59; px[i + 2] = 48; px[i + 3] = 210;
+            } else if (r < 5 && g < 5 && b < 5) {
+              px[i] = 70; px[i + 1] = 140; px[i + 2] = 255; px[i + 3] = 210;
+            } else {
+              px[i + 3] = 0;
+            }
+          }
+          cc.width = w;
+          cc.height = h;
+          cc.getContext("2d").putImageData(img, 0, 0);
+        }
       } catch (e) {
         /* histogram is optional */
       }
@@ -469,7 +531,7 @@ export default function App() {
     if (!imgInfo) return;
     render();
     scheduleHist();
-  }, [adj, masks, imgInfo, render, scheduleHist]);
+  }, [adj, masks, imgInfo, clipShow, render, scheduleHist]);
 
   const refreshWorking = useCallback((full) => {
     fullRef.current = full;
@@ -485,6 +547,19 @@ export default function App() {
   }, []);
 
   const setSource = useCallback((full, name) => {
+    /* remember the outgoing photo's edit so it can be pasted onto the next */
+    if (fullRef.current) {
+      const wasEdited =
+        Object.keys(adjRef.current).some((k) => adjRef.current[k] !== DEFAULTS[k]) ||
+        masksRef.current.length > 0;
+      if (wasEdited) {
+        prevEditRef.current = {
+          adj: { ...adjRef.current },
+          masks: masksRef.current.map((m) => ({ ...m, adj: { ...m.adj } })),
+        };
+        setHasPrevEdit(true);
+      }
+    }
     originalRef.current = full;
     cropParamsRef.current = null;
     setCropApplied(false);
@@ -531,6 +606,20 @@ export default function App() {
   };
 
   const toggleGroup = (g) => setOpenGroups((o) => ({ ...o, [g]: !o[g] }));
+
+  const revertToOriginal = () => {
+    if (originalRef.current && fullRef.current !== originalRef.current) {
+      refreshWorking(originalRef.current);
+    }
+    cropParamsRef.current = null;
+    setCropApplied(false);
+    setCropMode(false);
+    setAdj({ ...DEFAULTS });
+    setMasks([]);
+    setSelMask(null);
+    setAutoApplied(false);
+    setPickerMode(null);
+  };
 
   const change = (k, v) => setAdj((p) => ({ ...p, [k]: v }));
   const resetAll = () => {
@@ -624,6 +713,63 @@ export default function App() {
     }
   };
 
+  /* ------------------------- colour picking ------------------------- */
+
+  const wbPickButton = (
+    <button
+      className={"btn small wide wb-pick" + (pickerMode === "wb" ? " active" : "")}
+      onClick={() => setPickerMode(pickerMode === "wb" ? null : "wb")}
+    >
+      {pickerMode === "wb"
+        ? "Now click a white or grey area in the photo…"
+        : "Fix white balance: pick a neutral area"}
+    </button>
+  );
+
+  const samplePreviewAt = (fx, fy) => {
+    const p = previewRef.current;
+    if (!p) return null;
+    const cx = Math.round(fx * (p.width - 1));
+    const cy = Math.round(fy * (p.height - 1));
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const x = Math.min(p.width - 1, Math.max(0, cx + dx));
+        const y = Math.min(p.height - 1, Math.max(0, cy + dy));
+        const i = (y * p.width + x) * 4;
+        r += p.data[i];
+        g += p.data[i + 1];
+        b += p.data[i + 2];
+        n++;
+      }
+    }
+    return { r: r / n / 255, g: g / n / 255, b: b / n / 255 };
+  };
+
+  const handlePick = (e) => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const fx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const fy = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    const c = samplePreviewAt(fx, fy);
+    if (!c) return;
+    if (pickerModeRef.current === "wb") {
+      /* choose temp/tint that make the sampled patch neutral */
+      const t = ((c.b - c.r) / 0.24) * 100;
+      const target = (c.r + c.b) / 2;
+      const ti = ((target - c.g) / 0.10) * 100;
+      setAdj((prev) => ({
+        ...prev,
+        temperature: Math.round(Math.max(-100, Math.min(100, t))),
+        tint: Math.round(Math.max(-100, Math.min(100, ti))),
+      }));
+    } else if (pickerModeRef.current === "maskcolor" && selMask) {
+      updMask(selMask, { colorOn: true, colR: c.r, colG: c.g, colB: c.b });
+    }
+    setPickerMode(null);
+  };
+
   /* --------------------------- auto adjust -------------------------- */
 
   const autoAdjust = () => {
@@ -658,41 +804,134 @@ export default function App() {
        cool scenes (sunsets, ocean) don't get neutralised into dullness */
     const temp = clampV((((avgB - avgR) / 255 / 2) / 0.12) * 100 * 0.6, -25, 25);
     const tint = clampV((-((avgG - (avgR + avgB) / 2) / 255) / 0.10) * 100 * 0.5, -18, 18);
-    /* brightness toward a lively midpoint, but constrained by headroom:
-       don't brighten a dark photo so far that its bright tail (p99) clips,
-       and don't darken a bright photo so far that its dark tail (p01)
-       crushes. A small grace margin is allowed because the recovery sliders
-       below can pull a little back. */
-    const desiredEv = Math.log2(0.48 / Math.max(0.03, median));
+    /* peak-discounted brightness target: large uniform areas (a big sky, a
+       wall) form dominant histogram peaks and drag a plain median toward
+       themselves. Auto-exposure research treats dominant peaks as background
+       and down-weights them, so the target follows the interesting content. */
+    const BINS = 48;
+    const bins = new Array(BINS).fill(0);
+    for (let i = 0; i < lums.length; i++) {
+      bins[Math.min(BINS - 1, (lums[i] * BINS) | 0)]++;
+    }
+    const maxBin = Math.max(...bins);
+    let wTot = 0;
+    const wCum = new Array(BINS);
+    for (let b = 0; b < BINS; b++) {
+      wTot += bins[b] * (1 - 0.65 * Math.pow(bins[b] / maxBin, 2));
+      wCum[b] = wTot;
+    }
+    let wMedian = median;
+    for (let b = 0; b < BINS; b++) {
+      if (wCum[b] >= wTot / 2) {
+        wMedian = (b + 0.5) / BINS;
+        break;
+      }
+    }
+    const target = 0.6 * wMedian + 0.4 * median;
+
+    /* high-dynamic-range detection: histogram piled at both ends with an
+       empty middle (backlit subjects, interiors with windows). For these,
+       chasing a brightness target is futile; keep exposure conservative and
+       lean on recovery instead. */
+    let midCnt = 0;
+    for (let i = 0; i < lums.length; i++) {
+      if (lums[i] > 0.3 && lums[i] < 0.7) midCnt++;
+    }
+    const isHdr = p99 - p01 > 0.88 && midCnt / lums.length < 0.28;
+
+    /* brightness toward the target, constrained by headroom: don't brighten
+       a dark photo so far that its bright tail (p99) clips, and don't darken
+       a bright photo so far that its dark tail (p01) crushes. */
+    let desiredEv = Math.log2(0.48 / Math.max(0.03, target));
+    /* high-key protection: a bright photo that is NOT clipping is bright on
+       purpose (snow, beach, airy light). Darkening it toward mid-grey is the
+       classic "grey snow" metering error and reads as dull. Darkening is only
+       fully applied when there is real highlight clipping to protect. */
+    const preHi = (hiC / cnt) * 100;
+    const isHighKey = median > 0.58;
+    if (desiredEv < 0) {
+      /* darkening is the highlight slider's job, not exposure's: exposure
+         serves the subject, so any darkening impulse is heavily damped, and
+         on genuinely bright (high-key) photos it is nearly eliminated */
+      if (isHighKey && preHi <= 8) {
+        desiredEv = Math.max(desiredEv * 0.25, -0.25);
+      } else if (preHi <= 2) {
+        desiredEv = Math.max(desiredEv * 0.35, -0.35);
+      } else {
+        desiredEv = Math.max(desiredEv * 0.6, -0.6);
+      }
+    }
     const evMax = Math.log2(0.985 / Math.max(p99, 0.05)) + 0.15;
     const evMin = Math.log2(0.03 / Math.max(p01, 0.004)) - 0.15;
     let ev = desiredEv;
     if (ev > evMax) ev = evMax;
     if (ev < evMin && evMin < evMax) ev = evMin;
-    ev = Math.max(-0.9, Math.min(1.3, ev));
-    const exposure = clampV((ev / 1.8) * 100, -50, 75);
-    /* always add some punch; more when the tonal range is flat */
-    const contrast = clampV(8 + (0.82 - spread) * 140, 6, 40);
+    const evCap = isHdr ? 0.7 : 1.5;
+    ev = Math.max(-Math.min(1.1, evCap), Math.min(evCap, ev));
+    const exposure = clampV((ev / 1.8) * 100, -75, 90);
+
     /* recovery is computed from the PREDICTED post-exposure image, so a
        brightened dark photo gets its new bright clipping recovered, and a
-       darkened bright photo gets its new shadow crush lifted */
+       darkened bright photo gets its new shadow crush lifted. HDR scenes get
+       stronger recovery since exposure alone can't serve both ends. */
     const scale = Math.pow(2, ev);
-    let postHi = 0;
     let postLo = 0;
+    let postLoR = 0; /* recoverable: dark enough to need lifting, bright
+                        enough for the black-anchored curve to reach */
     for (let i = 0; i < lums.length; i++) {
       const l = lums[i] * scale;
+      if (l < 0.08) {
+        postLo++;
+        if (l > 0.015) postLoR++;
+      }
+    }
+    postLo = (postLo / lums.length) * 100;
+    postLoR = (postLoR / lums.length) * 100;
+    const shadows = postLoR > 1.5 ? clampV((8 + postLoR * 2.0) * (isHdr ? 1.1 : 1), 8, 50) : 0;
+
+    /* predict highlight pressure INCLUDING the shadow lift: opening shadows
+       also pushes some midtones up, so highlight recovery must account for
+       the image as it will be after the lift, not before */
+    const ss = (a, b, x) => {
+      const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+      return t * t * (3 - 2 * t);
+    };
+    const shGain = (shadows / 100) * 0.9;
+    let postHi = 0;
+    for (let i = 0; i < lums.length; i++) {
+      let l = lums[i] * scale;
+      l *= 1 + shGain * ss(0, 0.06, l) * (1 - ss(0.22, 0.5, l));
       if (l > 0.92) postHi++;
-      if (l < 0.08) postLo++;
     }
     postHi = (postHi / lums.length) * 100;
-    postLo = (postLo / lums.length) * 100;
-    const highlights = postHi > 1.2 ? -clampV(12 + postHi * 4, 12, 55) : 0;
-    const shadows = postLo > 1.5 ? clampV(10 + postLo * 4, 10, 45) : 0;
-    /* deepen blacks slightly when nothing is crushing, for solidity */
-    const blacks = postLo < 1 ? -8 : 0;
+    const highlights = postHi > 2 ? -clampV((10 + postHi * 3) * (isHdr ? 1.3 : 1), 10, 80) : 0;
+    /* black-point anchoring: lifting shadows raises the darkest pixels too,
+       and an image with nothing truly black reads as milky and washed out.
+       So the harder shadows are lifted, the more blacks are pushed back down
+       to keep the image anchored. */
+    /* blacks: a light anchor against milkiness, but NEVER pushed down when
+       the dark end is already crushing (the shadow curve is black-anchored,
+       so crushed blacks can't be rescued by it; darkening them further only
+       clips harder) */
+    const blacks =
+      shadows > 0 && postLo < 3
+        ? -clampV(6 + shadows * 0.25, 6, 18)
+        : postLo < 1
+        ? -8
+        : 0;
+
+    /* punch for flat images, backing off when recovery is working hard and
+       in proportion to how much of the dark end is already crushed */
+    const recoveryLoad = Math.abs(highlights) + shadows;
+    const contrastSlope = isHighKey ? 70 : 140;
+    const contrast = clampV(
+      8 + (0.82 - spread) * contrastSlope - recoveryLoad * 0.12 - postLo * 0.8,
+      5,
+      isHighKey ? 16 : isHdr ? 28 : 55
+    );
     /* always wake the colour up a little; more when it's muted */
     const meanSat = sSat / cnt;
-    const vibrance = clampV(12 + (0.20 - meanSat) * 160, 10, 35);
+    const vibrance = clampV(12 + (0.20 - meanSat) * 160, 10, 45);
 
     autoPrevRef.current = { ...adjRef.current };
     setAdj((prev) => ({
@@ -716,25 +955,39 @@ export default function App() {
 
   /* ------------------------------ masks ----------------------------- */
 
-  const addMask = (type) => {
+  const addMask = (kind) => {
     if (masksRef.current.length >= 6) return;
     maskCounter.current += 1;
     const id = maskCounter.current;
     const base = {
       id,
-      type,
       invert: false,
       feather: 50,
       lumLo: 0,
       lumHi: 100,
       adj: { exposure: -40, contrast: 0, temperature: 0, saturation: 0 },
     };
-    const m =
-      type === "radial"
-        ? { ...base, cx: 0.5, cy: 0.5, rx: 0.25, ry: 0.2 }
-        : { ...base, x0: 0.5, y0: 0.1, x1: 0.5, y1: 0.55 };
+    let m;
+    if (kind === "radial") {
+      m = { ...base, type: "radial", cx: 0.5, cy: 0.5, rx: 0.25, ry: 0.2 };
+    } else if (kind === "linear") {
+      m = { ...base, type: "linear", x0: 0.5, y0: 0.1, x1: 0.5, y1: 0.55 };
+    } else {
+      /* colour mask: a whole-frame radial whose weight comes from colour
+         matching; inert (exposure 0) until a colour is picked */
+      m = {
+        ...base,
+        type: "radial",
+        kind: "color",
+        cx: 0.5, cy: 0.5, rx: 1.8, ry: 1.8,
+        feather: 95,
+        colRange: 40,
+        adj: { exposure: 0, contrast: 0, temperature: 0, saturation: 0 },
+      };
+    }
     setMasks((ms) => [...ms, m]);
     setSelMask(id);
+    if (kind === "color") setPickerMode("maskcolor");
   };
 
   const updMask = (id, patch) =>
@@ -792,8 +1045,79 @@ export default function App() {
     window.addEventListener("pointerup", up);
   };
 
-  const renderMaskPanel = () => {
-    const sel = masks.find((m) => m.id === selMask);
+  const autoMask = () => {
+    const p = previewRef.current;
+    if (!p || masksRef.current.length >= 6) return;
+    const { data, width, height } = p;
+    const clampV = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const BANDS = 48;
+    const rowSum = new Array(BANDS).fill(0);
+    const rowCnt = new Array(BANDS).fill(0);
+    const colSum = new Array(BANDS).fill(0);
+    const colCnt = new Array(BANDS).fill(0);
+    const stepY = Math.max(1, (height / 160) | 0);
+    const stepX = Math.max(1, (width / 160) | 0);
+    for (let y = 0; y < height; y += stepY) {
+      for (let x = 0; x < width; x += stepX) {
+        const i = (y * width + x) * 4;
+        const lum = (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) / 255;
+        const rb = Math.min(BANDS - 1, ((y / height) * BANDS) | 0);
+        const cb = Math.min(BANDS - 1, ((x / width) * BANDS) | 0);
+        rowSum[rb] += lum;
+        rowCnt[rb]++;
+        colSum[cb] += lum;
+        colCnt[cb]++;
+      }
+    }
+    const rowM = rowSum.map((v, i) => v / Math.max(1, rowCnt[i]));
+    const colM = colSum.map((v, i) => v / Math.max(1, colCnt[i]));
+    const bandAvg = (arr, a, b) => {
+      let t = 0, n = 0;
+      for (let i = Math.floor(a * BANDS); i < Math.floor(b * BANDS); i++) { t += arr[i]; n++; }
+      return t / Math.max(1, n);
+    };
+    const vDiff = bandAvg(rowM, 0, 0.35) - bandAvg(rowM, 0.65, 1);
+    const hDiff = bandAvg(colM, 0, 0.35) - bandAvg(colM, 0.65, 1);
+    const vertical = Math.abs(vDiff) >= Math.abs(hDiff);
+    const arr = vertical ? rowM : colM;
+    const diff = vertical ? vDiff : hDiff;
+
+    /* transition: the band with the steepest brightness change */
+    let best = BANDS / 2;
+    let bestG = 0;
+    for (let i = 3; i < BANDS - 3; i++) {
+      const g = Math.abs(arr[i + 2] - arr[i - 2]);
+      if (g > bestG && i / BANDS > 0.12 && i / BANDS < 0.88) {
+        bestG = g;
+        best = i;
+      }
+    }
+    const t = (best + 0.5) / BANDS;
+    const brightFirst = diff > 0; /* bright side is top (or left) */
+
+    const amt = -Math.round(clampV(18 + Math.abs(diff) * 90, 18, 55));
+    maskCounter.current += 1;
+    const id = maskCounter.current;
+    const start = brightFirst ? 0.05 : 0.95;
+    const end = brightFirst ? clampV(t + 0.08, 0.2, 0.95) : clampV(t - 0.08, 0.05, 0.8);
+    const m = {
+      id,
+      type: "linear",
+      invert: false,
+      feather: 50,
+      lumLo: 25,
+      lumHi: 100,
+      adj: { exposure: amt, contrast: 0, temperature: 0, saturation: 0 },
+      x0: vertical ? 0.5 : start,
+      y0: vertical ? start : 0.5,
+      x1: vertical ? 0.5 : end,
+      y1: vertical ? end : 0.5,
+    };
+    setMasks((ms) => [...ms, m]);
+    setSelMask(id);
+  };
+
+  const renderMaskPanel = (showAuto = false) => {
     return (
       <div className="mask-panel">
         <div className="mask-add">
@@ -803,41 +1127,83 @@ export default function App() {
           <button className="btn small" onClick={() => addMask("linear")} disabled={masks.length >= 6}>
             + Linear
           </button>
+          {showAuto && (
+            <>
+              <button className="btn small" onClick={() => addMask("color")} disabled={masks.length >= 6}>
+                + Colour
+              </button>
+              <button className="btn small" onClick={autoMask} disabled={masks.length >= 6}>
+                Auto
+              </button>
+            </>
+          )}
         </div>
         {masks.length > 0 && (
           <div className="mask-list">
             {masks.map((m, i) => (
-              <div key={m.id} className={"mask-row" + (m.id === selMask ? " on" : "")}>
-                <button
-                  className="mask-name"
-                  onClick={() => setSelMask(m.id === selMask ? null : m.id)}
-                >
-                  {m.type === "radial" ? "Radial" : "Linear"} {i + 1}
-                </button>
-                <button className="mask-del" onClick={() => delMask(m.id)} aria-label="Delete mask">
-                  {"×"}
-                </button>
+              <div key={m.id} className={"mask-item" + (m.id === selMask ? " on" : "")}>
+                <div className="mask-row">
+                  <button
+                    className="mask-name"
+                    onClick={() => setSelMask(m.id === selMask ? null : m.id)}
+                  >
+                    {m.kind === "color" ? "Colour" : m.type === "radial" ? "Radial" : "Linear"} {i + 1}
+                    <span className="chev">{m.id === selMask ? "−" : "+"}</span>
+                  </button>
+                  <button className="mask-del" onClick={() => delMask(m.id)} aria-label="Delete mask">
+                    {"×"}
+                  </button>
+                </div>
+                {m.id === selMask && (
+                  <div className="mask-ctrls">
+                    <Slider k="m_exposure" value={m.adj.exposure} onChange={(k, v) => updMaskAdj(m.id, "exposure", v)} />
+                    <Slider k="m_contrast" value={m.adj.contrast} onChange={(k, v) => updMaskAdj(m.id, "contrast", v)} />
+                    <Slider k="m_temperature" value={m.adj.temperature} onChange={(k, v) => updMaskAdj(m.id, "temperature", v)} />
+                    <Slider k="m_saturation" value={m.adj.saturation} onChange={(k, v) => updMaskAdj(m.id, "saturation", v)} />
+                    {showAuto && (
+                      <div className="mask-color">
+                        <button
+                          className={"btn small" + (pickerMode === "maskcolor" ? " active" : "")}
+                          onClick={() => setPickerMode(pickerMode === "maskcolor" ? null : "maskcolor")}
+                        >
+                          {m.colorOn ? "Re-pick colour" : "Pick colour"}
+                        </button>
+                        {m.colorOn && (
+                          <>
+                            <span
+                              className="color-swatch"
+                              style={{
+                                background: `rgb(${Math.round((m.colR || 0) * 255)}, ${Math.round((m.colG || 0) * 255)}, ${Math.round((m.colB || 0) * 255)})`,
+                              }}
+                            />
+                            <button
+                              className="btn small ghost"
+                              onClick={() => updMask(m.id, { colorOn: false })}
+                            >
+                              Clear
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {showAuto && m.colorOn && (
+                      <Slider k="m_colrange" value={m.colRange === undefined ? 40 : m.colRange} onChange={(k, v) => updMask(m.id, { colRange: v })} />
+                    )}
+                    {m.type === "radial" && m.kind !== "color" && (
+                      <Slider k="m_feather" value={m.feather} onChange={(k, v) => updMask(m.id, { feather: v })} />
+                    )}
+                    <Slider k="m_lumlo" value={m.lumLo} onChange={(k, v) => updMask(m.id, { lumLo: v })} />
+                    <Slider k="m_lumhi" value={m.lumHi} onChange={(k, v) => updMask(m.id, { lumHi: v })} />
+                    <button
+                      className={"btn small" + (m.invert ? " active" : "")}
+                      onClick={() => updMask(m.id, { invert: !m.invert })}
+                    >
+                      Invert mask
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
-          </div>
-        )}
-        {sel && (
-          <div className="mask-ctrls">
-            <Slider k="m_exposure" value={sel.adj.exposure} onChange={(k, v) => updMaskAdj(sel.id, "exposure", v)} />
-            <Slider k="m_contrast" value={sel.adj.contrast} onChange={(k, v) => updMaskAdj(sel.id, "contrast", v)} />
-            <Slider k="m_temperature" value={sel.adj.temperature} onChange={(k, v) => updMaskAdj(sel.id, "temperature", v)} />
-            <Slider k="m_saturation" value={sel.adj.saturation} onChange={(k, v) => updMaskAdj(sel.id, "saturation", v)} />
-            {sel.type === "radial" && (
-              <Slider k="m_feather" value={sel.feather} onChange={(k, v) => updMask(sel.id, { feather: v })} />
-            )}
-            <Slider k="m_lumlo" value={sel.lumLo} onChange={(k, v) => updMask(sel.id, { lumLo: v })} />
-            <Slider k="m_lumhi" value={sel.lumHi} onChange={(k, v) => updMask(sel.id, { lumHi: v })} />
-            <button
-              className={"btn small" + (sel.invert ? " active" : "")}
-              onClick={() => updMask(sel.id, { invert: !sel.invert })}
-            >
-              Invert mask
-            </button>
           </div>
         )}
       </div>
@@ -897,6 +1263,8 @@ export default function App() {
         zoomBy(0.8);
       } else if (e.key === "0") {
         setZoom({ z: 1, tx: 0, ty: 0 });
+      } else if (e.key === "Escape") {
+        setPickerMode(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -932,8 +1300,31 @@ export default function App() {
     }
     setCropDraft({ x: 0.08, y: 0.08, w: 0.84, h: 0.84 });
     setCropAngle(0);
+    setCropAspect(null);
     setZoom({ z: 1, tx: 0, ty: 0 });
     setCropMode(true);
+  };
+
+  const chooseAspect = (a) => {
+    setCropAspect(a);
+    if (a && wrapRef.current) {
+      const r = wrapRef.current.getBoundingClientRect();
+      setCropDraft((d) => {
+        let w = d.w;
+        let h = (w * r.width) / (a * r.height);
+        if (h > 0.94) {
+          h = 0.94;
+          w = (h * a * r.height) / r.width;
+        }
+        if (w > 0.94) {
+          w = 0.94;
+          h = (w * r.width) / (a * r.height);
+        }
+        const x = Math.min(Math.max(0, d.x + (d.w - w) / 2), 1 - w);
+        const y = Math.min(Math.max(0, d.y + (d.h - h) / 2), 1 - h);
+        return { x, y, w, h };
+      });
+    }
   };
 
   const cancelCrop = () => {
@@ -1035,6 +1426,18 @@ export default function App() {
         }
         if (d.kind.includes("b")) {
           h = Math.max(MIN, Math.min(1 - y, h + dy));
+        }
+        const a = cropAspectRef.current;
+        if (a) {
+          h = (w * d.r.width) / (a * d.r.height);
+          if (d.kind.includes("t")) y = d.rect.y + d.rect.h - h;
+          if (y < 0 || y + h > 1) {
+            const maxH = d.kind.includes("t") ? d.rect.y + d.rect.h : 1 - y;
+            h = Math.min(h, Math.max(MIN, maxH));
+            w = (h * a * d.r.height) / d.r.width;
+            if (d.kind.includes("l")) x = d.rect.x + d.rect.w - w;
+            if (d.kind.includes("t")) y = d.rect.y + d.rect.h - h;
+          }
         }
       }
       setCropDraft({ x, y, w, h });
@@ -1165,14 +1568,35 @@ export default function App() {
                       Load edits
                     </label>
                   </div>
+                  {hasPrevEdit && (
+                    <button
+                      className="btn small wide"
+                      onClick={() => {
+                        const pe = prevEditRef.current;
+                        if (!pe) return;
+                        setAdj({ ...DEFAULTS, ...pe.adj });
+                        const cloned = pe.masks.map((m) => ({ ...m, adj: { ...m.adj } }));
+                        setMasks(cloned);
+                        maskCounter.current = cloned.reduce((mx, m) => Math.max(mx, m.id), 0);
+                        setSelMask(null);
+                        setExportOpen(false);
+                      }}
+                    >
+                      Paste previous photo's edit
+                    </button>
+                  )}
                 </div>
               )}
             </div>
             <label className="btn ghost small" htmlFor="sf-file" role="button" tabIndex={0}>
               Change photo
             </label>
-            <button className="btn ghost small" onClick={resetAll} disabled={!edited}>
-              Reset all
+            <button
+              className="btn ghost small"
+              onClick={revertToOriginal}
+              disabled={!edited && masks.length === 0 && !cropApplied}
+            >
+              Revert to original
             </button>
           </div>
         )}
@@ -1270,6 +1694,23 @@ export default function App() {
                 <button className="sl-value" onClick={() => setCropAngle(0)} title="Reset angle">
                   {cropAngle.toFixed(1)}°
                 </button>
+                <span className="seg">
+                  {[
+                    ["Free", null],
+                    ["1:1", 1],
+                    ["4:5", 0.8],
+                    ["3:2", 1.5],
+                    ["16:9", 16 / 9],
+                  ].map(([label, v]) => (
+                    <button
+                      key={label}
+                      className={"seg-btn" + (cropAspect === v ? " on" : "")}
+                      onClick={() => chooseAspect(v)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </span>
                 <span className="crop-actions">
                   <button className="btn small" onClick={cancelCrop}>Cancel</button>
                   {cropApplied && (
@@ -1283,18 +1724,28 @@ export default function App() {
             )}
 
             <div className="stage-inner" ref={stageInnerRef}>
+              {pickerMode && (
+                <div className="pick-hint">
+                  {pickerMode === "wb"
+                    ? "Click something that should be white or grey (paper, clouds, pavement)"
+                    : "Click the colour you want this mask to target"}
+                </div>
+              )}
               <div
                 className="canvas-wrap"
                 ref={wrapRef}
-                onPointerDown={startPan}
-                style={
-                  zoom.z > 1
-                    ? {
-                        transform: `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.z})`,
-                        cursor: "grab",
-                      }
-                    : undefined
-                }
+                onPointerDown={(e) => {
+                  if (pickerModeRef.current) {
+                    e.preventDefault();
+                    handlePick(e);
+                  } else {
+                    startPan(e);
+                  }
+                }}
+                style={{
+                  transform: zoom.z > 1 ? `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.z})` : undefined,
+                  cursor: pickerMode ? "crosshair" : zoom.z > 1 ? "grab" : "default",
+                }}
               >
                 <div
                   className="rot-layer"
@@ -1315,6 +1766,9 @@ export default function App() {
                 >
                   <canvas ref={origCanvasRef} className="canvas orig" />
                   <canvas ref={glCanvasRef} className="canvas edit" style={{ clipPath }} />
+                  {clipShow && (
+                    <canvas ref={clipCanvasRef} className="canvas clipov" style={{ clipPath }} />
+                  )}
                 </div>
                 {cropMode && (
                   <div
@@ -1361,7 +1815,7 @@ export default function App() {
                 {holding && <span className="chip chip-l">Original</span>}
                 {(() => {
                   const m = masks.find((x) => x.id === selMask);
-                  if (!m || cropMode) return null;
+                  if (!m || cropMode || m.kind === "color") return null;
                   if (m.type === "radial") {
                     return (
                       <div className="mask-overlay">
@@ -1444,19 +1898,42 @@ export default function App() {
               ))}
             </div>
 
-            <Histogram hist={hist} showToggle={tab === "advanced"} showHelp={tab === "guided"} />
+            <Histogram
+              hist={hist}
+              showToggle={tab === "advanced"}
+              showHelp={tab === "guided"}
+              clipShow={clipShow}
+              onToggleClip={() => setClipShow((v) => !v)}
+            />
 
             {tab === "essentials" ? (
               <div className="ess">
                 {autoApplied ? (
                   <button className="btn wide auto-btn" onClick={revertAuto}>
-                    Undo auto adjust
+                    Undo auto / look
                   </button>
                 ) : (
                   <button className="btn primary wide auto-btn" onClick={autoAdjust}>
                     Auto adjust
                   </button>
                 )}
+                <div className="preset-label">Looks</div>
+                <div className="preset-row">
+                  {PRESETS.map(([name, values]) => (
+                    <button
+                      key={name}
+                      className="preset-chip"
+                      onClick={() => {
+                        autoPrevRef.current = { ...adjRef.current };
+                        setAdj((prev) => ({ ...prev, ...values }));
+                        setAutoApplied(true);
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+                {wbPickButton}
                 {ESSENTIALS.map((k) => (
                   <Slider key={k} k={k} value={adj[k]} onChange={change} />
                 ))}
@@ -1559,14 +2036,33 @@ export default function App() {
               )
             ) : (
               <div className="adv">
+                {autoApplied ? (
+                  <button className="btn wide auto-btn" onClick={revertAuto}>
+                    Undo auto / look
+                  </button>
+                ) : (
+                  <button className="btn primary wide auto-btn" onClick={autoAdjust}>
+                    Auto adjust
+                  </button>
+                )}
                 <div className="group">
                   <button className="group-toggle" onClick={() => toggleGroup("wb")} aria-expanded={openGroups.wb}>
                     White balance<span className="chev">{openGroups.wb ? "−" : "+"}</span>
                   </button>
-                  {openGroups.wb &&
-                    ["temperature", "tint"].map((k) => (
-                      <Slider key={k} k={k} value={adj[k]} onChange={change} />
-                    ))}
+                  {openGroups.wb && (
+                    <>
+                      <button
+                        className={"btn small wb-pick-compact" + (pickerMode === "wb" ? " active" : "")}
+                        title="Click a neutral white or grey area in the photo"
+                        onClick={() => setPickerMode(pickerMode === "wb" ? null : "wb")}
+                      >
+                        {"⌖"} Eyedropper
+                      </button>
+                      {["temperature", "tint"].map((k) => (
+                        <Slider key={k} k={k} value={adj[k]} onChange={change} />
+                      ))}
+                    </>
+                  )}
                 </div>
                 <div className="group">
                   <button className="group-toggle" onClick={() => toggleGroup("light")} aria-expanded={openGroups.light}>
@@ -1629,7 +2125,7 @@ export default function App() {
                     Effects<span className="chev">{openGroups.effects ? "−" : "+"}</span>
                   </button>
                   {openGroups.effects &&
-                    ["clarity", "dehaze", "vignette"].map((k) => (
+                    ["clarity", "dehaze", "vignette", "grain"].map((k) => (
                       <Slider key={k} k={k} value={adj[k]} onChange={change} />
                     ))}
                 </div>
@@ -1637,7 +2133,7 @@ export default function App() {
                   <button className="group-toggle" onClick={() => toggleGroup("masking")} aria-expanded={openGroups.masking}>
                     Masking<span className="chev">{openGroups.masking ? "−" : "+"}</span>
                   </button>
-                  {openGroups.masking && renderMaskPanel()}
+                  {openGroups.masking && renderMaskPanel(true)}
                 </div>
                 <div className="group">
                   <button className="group-toggle" onClick={() => toggleGroup("detail")} aria-expanded={openGroups.detail}>
@@ -1646,6 +2142,7 @@ export default function App() {
                   {openGroups.detail && (
                     <>
                       <Slider k="sharpen" value={adj.sharpen} onChange={change} />
+                      <Slider k="texture" value={adj.texture} onChange={change} />
                       <Slider k="noise" value={adj.noise} onChange={change} />
                     </>
                   )}
@@ -2151,18 +2648,83 @@ input.hue::-moz-range-track {
 .ess { display: flex; flex-direction: column; }
 .auto-btn { margin: 0 0 16px; }
 
+.wb-pick { margin-bottom: 14px; text-align: left; }
+.wb-pick-compact { margin-bottom: 12px; }
+.pick-hint {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 12;
+  font-size: 13px; font-weight: 500;
+  color: #1a1408;
+  background: var(--amber);
+  border-radius: 8px;
+  padding: 8px 14px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+  pointer-events: none;
+  max-width: 90%;
+  text-align: center;
+}
+
+.preset-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+.preset-row { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+.preset-chip {
+  font-family: inherit; font-size: 12.5px; font-weight: 500;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 6px 13px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.preset-chip:hover { border-color: var(--amber); color: var(--amber); }
+
+.clip-btn {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.clip-btn.on { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
+
+.canvas.clipov {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.mask-color { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.color-swatch {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  flex-shrink: 0;
+}
+
 .mask-panel { margin-bottom: 6px; }
 .mask-add { display: flex; gap: 8px; margin-bottom: 10px; }
 .mask-add .btn { flex: 1; }
 .mask-list { margin-bottom: 12px; }
-.mask-row {
-  display: flex; align-items: center; gap: 6px;
+.mask-item {
   border: 1px solid var(--line);
   border-radius: 8px;
   margin-bottom: 6px;
   overflow: hidden;
 }
-.mask-row.on { border-color: var(--amber); background: var(--amber-soft); }
+.mask-item.on { border-color: var(--amber); }
+.mask-item.on .mask-row { background: var(--amber-soft); }
+.mask-row {
+  display: flex; align-items: center; gap: 6px;
+}
 .mask-name {
   flex: 1; text-align: left;
   font-family: inherit; font-size: 13px; font-weight: 500;
@@ -2170,7 +2732,9 @@ input.hue::-moz-range-track {
   background: none; border: none; cursor: pointer;
   padding: 8px 11px;
 }
-.mask-row.on .mask-name { color: var(--amber); }
+.mask-item.on .mask-name { color: var(--amber); }
+.mask-name .chev { margin-left: 8px; }
+.mask-item .mask-ctrls { padding: 10px 11px 6px; border-top: 1px solid var(--line); }
 .mask-del {
   font-size: 15px; line-height: 1;
   color: var(--muted);

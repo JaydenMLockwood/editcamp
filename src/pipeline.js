@@ -29,7 +29,7 @@ uniform vec2 u_texel;
 uniform vec2 u_frameA; /* tile size as fraction of full frame */
 uniform vec2 u_frameB; /* tile offset as fraction of full frame */
 uniform float u_temp, u_tint, u_exp, u_con, u_hi, u_sh, u_wh, u_bl, u_sat, u_vib;
-uniform float u_nr, u_shp, u_cl, u_dz, u_vig;
+uniform float u_nr, u_shp, u_cl, u_dz, u_vig, u_txt, u_grn;
 uniform float u_ssh, u_ssa, u_shh, u_sha;
 uniform float u_mixC[8];
 uniform float u_mixH[8];
@@ -40,8 +40,22 @@ uniform float u_mType[6]; /* 0 radial, 1 linear */
 uniform vec4 u_mA[6];     /* radial: cx,cy,rx,ry  linear: x0,y0,x1,y1 */
 uniform vec4 u_mB[6];     /* feather, invert, lumLo, lumHi */
 uniform vec4 u_mAdj[6];   /* exposure, contrast, temperature, saturation */
+uniform vec4 u_mCol[6];   /* target colour rgb + enabled flag */
+uniform float u_mRng[6];  /* colour match looseness */
 
 const vec3 LUMW = vec3(0.299, 0.587, 0.114);
+
+/* Contrast with a filmic-style toe and shoulder: same midtone slope as a
+   linear pivot, but the curve approaches 0 and 1 asymptotically, so no
+   amount of positive contrast can push pixels past either wall. Negative
+   (flattening) contrast stays linear since it cannot clip. */
+vec3 applyContrast(vec3 x, float k) {
+  vec3 d = x - 0.5;
+  if (k > 0.0) {
+    return 0.5 + d * (1.0 + k) / (1.0 + 2.0 * k * abs(d));
+  }
+  return 0.5 + d * (1.0 + k);
+}
 
 vec3 rgb2hsv(vec3 c) {
   vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
@@ -118,10 +132,14 @@ void main() {
     c = mix(vec3(ld), c, 1.0 + 0.25 * u_dz);
   }
 
-  /* luminance-masked recovery */
+  /* luminance-masked recovery. The shadow lift is a black-anchored curve:
+     multiplicative gain that falls to zero at pure black, so opening shadows
+     brightens the low-mids without lifting the black point (an additive lift
+     raises true blacks too, which reads as milky wash). */
   float lum = dot(clamp(c, 0.0, 1.0), LUMW);
-  c += u_hi * 0.35 * smoothstep(0.45, 1.0, lum);
-  c += u_sh * 0.35 * (1.0 - smoothstep(0.0, 0.55, lum));
+  c += u_hi * 0.35 * smoothstep(0.62, 1.0, lum);
+  float sMask = smoothstep(0.0, 0.06, lum) * (1.0 - smoothstep(0.22, 0.5, lum));
+  c *= 1.0 + u_sh * 0.9 * sMask;
   c += u_wh * 0.18 * smoothstep(0.70, 1.0, lum);
   c += u_bl * 0.18 * (1.0 - smoothstep(0.0, 0.30, lum));
 
@@ -136,8 +154,16 @@ void main() {
     c += u_cl * 1.2 * det * (0.25 + 0.75 * midW);
   }
 
-  /* contrast around mid gray */
-  c = (c - 0.5) * (1.0 + u_con * 0.8) + 0.5;
+  /* texture: mid-size detail, smaller radius than clarity */
+  if (abs(u_txt) > 0.004) {
+    vec2 co2 = vec2(0.0015) / u_frameA;
+    float ot = dot(texture2D(u_tex, v_uv).rgb, LUMW);
+    float bt = dot(gauss3(v_uv, co2), LUMW);
+    c += u_txt * 1.5 * (ot - bt);
+  }
+
+  /* contrast around mid gray (clip-safe sigmoid) */
+  c = applyContrast(c, u_con * 0.8);
 
   /* saturation + vibrance */
   float l2 = dot(clamp(c, 0.0, 1.0), LUMW);
@@ -194,9 +220,16 @@ void main() {
     float loT = mix(smoothstep(lo - 0.08, lo + 0.04, baseLum), 1.0, step(lo, 0.002));
     float hiT = mix(1.0 - smoothstep(hi - 0.04, hi + 0.08, baseLum), 1.0, step(0.998, hi));
     w *= loT * hiT;
+    /* colour range: only affect pixels similar to the picked colour */
+    if (u_mCol[i].w > 0.5) {
+      vec3 srcc = texture2D(u_tex, v_uv).rgb;
+      float cd = distance(srcc, u_mCol[i].rgb);
+      float rng = max(u_mRng[i], 0.02) * 0.6;
+      w *= 1.0 - smoothstep(rng * 0.7, rng * 1.5, cd);
+    }
     if (w > 0.001) {
       c *= pow(2.0, u_mAdj[i].x * 1.8 * w);
-      c = (c - 0.5) * (1.0 + u_mAdj[i].y * 0.8 * w) + 0.5;
+      c = applyContrast(c, u_mAdj[i].y * 0.8 * w);
       c.r += u_mAdj[i].z * 0.12 * w;
       c.b -= u_mAdj[i].z * 0.12 * w;
       float lmm = dot(clamp(c, 0.0, 1.0), LUMW);
@@ -219,6 +252,13 @@ void main() {
     c *= 1.0 + u_vig * 0.85 * smoothstep(0.45, 1.05, vd);
   }
 
+  /* film grain: lattice noise in frame coordinates so export matches preview */
+  if (u_grn > 0.004) {
+    float n = fract(sin(dot(floor(gFrame * 1400.0), vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+    float lg = dot(clamp(c, 0.0, 1.0), LUMW);
+    c += n * u_grn * 0.22 * (0.3 + 0.7 * max(0.0, 1.0 - abs(lg - 0.5) * 1.7));
+  }
+
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }`;
 
@@ -234,7 +274,7 @@ function compile(gl, type, src) {
 
 const SCALARS = [
   "u_temp", "u_tint", "u_exp", "u_con", "u_hi", "u_sh", "u_wh", "u_bl",
-  "u_sat", "u_vib", "u_nr", "u_shp", "u_cl", "u_dz", "u_vig",
+  "u_sat", "u_vib", "u_nr", "u_shp", "u_cl", "u_dz", "u_vig", "u_txt", "u_grn",
   "u_ssh", "u_ssa", "u_shh", "u_sha",
 ];
 
@@ -256,6 +296,8 @@ export function toUniforms(adj) {
     u_cl: (adj.clarity || 0) / 100,
     u_dz: (adj.dehaze || 0) / 100,
     u_vig: (adj.vignette || 0) / 100,
+    u_txt: (adj.texture || 0) / 100,
+    u_grn: (adj.grain || 0) / 100,
     u_ssh: (adj.st_sh_hue || 0) / 100,
     u_ssa: (adj.st_sh_amt || 0) / 100,
     u_shh: (adj.st_hi_hue || 0) / 100,
@@ -327,6 +369,8 @@ export function createPipeline(canvas) {
     u_mA: gl.getUniformLocation(prog, "u_mA"),
     u_mB: gl.getUniformLocation(prog, "u_mB"),
     u_mAdj: gl.getUniformLocation(prog, "u_mAdj"),
+    u_mCol: gl.getUniformLocation(prog, "u_mCol"),
+    u_mRng: gl.getUniformLocation(prog, "u_mRng"),
   };
   SCALARS.forEach((n) => (uniforms[n] = gl.getUniformLocation(prog, n)));
 
@@ -358,6 +402,8 @@ export function createPipeline(canvas) {
       const mA = new Float32Array(MAXM * 4);
       const mB = new Float32Array(MAXM * 4);
       const mJ = new Float32Array(MAXM * 4);
+      const mC = new Float32Array(MAXM * 4);
+      const mR = new Float32Array(MAXM);
       for (let i = 0; i < count; i++) {
         const m = masks[i];
         mT[i] = m.type === "linear" ? 1 : 0;
@@ -374,12 +420,21 @@ export function createPipeline(canvas) {
         mJ[i * 4 + 1] = (m.adj.contrast || 0) / 100;
         mJ[i * 4 + 2] = (m.adj.temperature || 0) / 100;
         mJ[i * 4 + 3] = (m.adj.saturation || 0) / 100;
+        if (m.colorOn) {
+          mC[i * 4] = m.colR || 0;
+          mC[i * 4 + 1] = m.colG || 0;
+          mC[i * 4 + 2] = m.colB || 0;
+          mC[i * 4 + 3] = 1;
+        }
+        mR[i] = (m.colRange === undefined ? 40 : m.colRange) / 100;
       }
       gl.uniform1i(uniforms.u_mCount, count);
       gl.uniform1fv(uniforms.u_mType, mT);
       gl.uniform4fv(uniforms.u_mA, mA);
       gl.uniform4fv(uniforms.u_mB, mB);
       gl.uniform4fv(uniforms.u_mAdj, mJ);
+      gl.uniform4fv(uniforms.u_mCol, mC);
+      gl.uniform1fv(uniforms.u_mRng, mR);
       gl.uniform1f(uniforms.u_flip, flip);
       gl.uniform2f(uniforms.u_texel, 1 / texW, 1 / texH);
       if (frame) {
