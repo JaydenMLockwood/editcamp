@@ -147,6 +147,7 @@ const PRESETS = [
   ["B&W", { saturation: -100, contrast: 20, clarity: 15, grain: 20 }],
 ];
 
+
 const DONATE_URL = "https://ko-fi.com/editcamp";
 
 /* Tiny IndexedDB key-value store for the local session (photo + edits).
@@ -1994,8 +1995,8 @@ export default function App() {
           <div className="privacy-text">
             EditCamp runs entirely on your device. Photos are never uploaded
             anywhere. Your current photo and edits are saved in this browser
-            only, so you can pick up where you left off. No cookies, no
-            tracking, no analytics.
+            only, so you can pick up where you left off. No cookies and no
+            tracking; only anonymous, cookieless visit counts.
           </div>
           <div className="privacy-actions">
             <button
