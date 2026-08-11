@@ -147,7 +147,8 @@ const PRESETS = [
   ["B&W", { saturation: -100, contrast: 20, clarity: 15, grain: 20 }],
 ];
 
-
+/* Replace with your own donation page (e.g. https://ko-fi.com/yourname).
+   Set to null to hide the support button entirely. */
 const DONATE_URL = "https://ko-fi.com/editcamp";
 
 /* Tiny IndexedDB key-value store for the local session (photo + edits).
