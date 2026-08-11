@@ -439,6 +439,13 @@ export default function App() {
     () => !localStorage.getItem("ec_privacy_ok")
   );
   const restoredRef = useRef(false);
+  const [isNarrow, setIsNarrow] = useState(
+    () => window.matchMedia("(max-width: 900px)").matches
+  );
+  const [isTouch, setIsTouch] = useState(
+    () => window.matchMedia("(pointer: coarse)").matches
+  );
+  const [infoOpen, setInfoOpen] = useState(false);
   const historyRef = useRef({ stack: [], idx: -1 });
   const applyingHistRef = useRef(false);
   const applyHistoryRef = useRef(() => {});
@@ -632,6 +639,7 @@ export default function App() {
     setSelMask(null);
     maskCounter.current = 0;
     setAutoApplied(false);
+    setInfoOpen(false);
     setMeta(full.meta || null);
     setAdj({ ...DEFAULTS });
     setStep(0);
@@ -941,6 +949,19 @@ export default function App() {
       setErr("Couldn't load edits: " + (ex && ex.message ? ex.message : String(ex)));
     }
   };
+
+  useEffect(() => {
+    const mN = window.matchMedia("(max-width: 900px)");
+    const mT = window.matchMedia("(pointer: coarse)");
+    const onN = (e) => setIsNarrow(e.matches);
+    const onT = (e) => setIsTouch(e.matches);
+    mN.addEventListener("change", onN);
+    mT.addEventListener("change", onT);
+    return () => {
+      mN.removeEventListener("change", onN);
+      mT.removeEventListener("change", onT);
+    };
+  }, []);
 
   /* undo/redo: snapshot the full edit state (sliders, masks, crop) after
      each settled change. Debounced so a slider drag is one history entry. */
@@ -1974,14 +1995,14 @@ export default function App() {
               )}
             </div>
             <label className="btn ghost small" htmlFor="sf-file" role="button" tabIndex={0}>
-              Change photo
+              {isNarrow ? "Change" : "Change photo"}
             </label>
             <button
               className="btn ghost small"
               onClick={revertToOriginal}
               disabled={!edited && masks.length === 0 && !cropApplied}
             >
-              Revert to original
+              {isNarrow ? "Revert" : "Revert to original"}
             </button>
             </>
           )}
@@ -2130,27 +2151,56 @@ export default function App() {
                   setSplit((s) => !s);
                 }}
               >
-                Split view
+                {isNarrow ? "Split" : "Split view"}
               </button>
-              <button
-                className="btn small"
-                onPointerDown={() => setHolding(true)}
-                onPointerUp={() => setHolding(false)}
-                onPointerLeave={() => setHolding(false)}
-              >
-                Hold to see original
-              </button>
+              {isTouch ? (
+                <button
+                  className={"btn small" + (holding ? " active" : "")}
+                  aria-pressed={holding}
+                  onClick={() => setHolding((h) => !h)}
+                >
+                  {isNarrow ? "Original" : "Show original"}
+                </button>
+              ) : (
+                <button
+                  className="btn small"
+                  onPointerDown={() => setHolding(true)}
+                  onPointerUp={() => setHolding(false)}
+                  onPointerLeave={() => setHolding(false)}
+                >
+                  {isNarrow ? "Original" : "Hold to see original"}
+                </button>
+              )}
               <button
                 className={"btn small" + (cropMode || cropApplied ? " active" : "")}
                 onClick={() => (cropMode ? cancelCrop() : startCrop())}
               >
-                {cropMode ? "Exit crop" : "Crop & straighten"}
+                {cropMode ? (isNarrow ? "Exit" : "Exit crop") : isNarrow ? "Crop" : "Crop & straighten"}
               </button>
-              <span className="meta-line">
-                {formatMeta(meta)}
-                {meta && imgInfo ? " · " : ""}
-                {imgInfo ? `${imgInfo.w}×${imgInfo.h}` : ""}
-              </span>
+              {isNarrow ? (
+                <span className="meta-mini">
+                  {imgInfo ? `${imgInfo.w}×${imgInfo.h}` : ""}
+                  {meta && formatMeta(meta) && (
+                    <button
+                      className={"info-btn" + (infoOpen ? " on" : "")}
+                      aria-label="Photo information"
+                      aria-expanded={infoOpen}
+                      onClick={() => setInfoOpen((o) => !o)}
+                    >
+                      i
+                    </button>
+                  )}
+                  {infoOpen && meta && (
+                    <span className="info-pop">{formatMeta(meta)}</span>
+                  )}
+                </span>
+              ) : (
+                <span className="meta-line">
+                  {formatMeta(meta)}
+                  {meta && imgInfo ? " · " : ""}
+                  {imgInfo ? `${imgInfo.w}×${imgInfo.h}` : ""}
+                </span>
+              )}
             </div>
 
             {cropMode && (
@@ -2881,6 +2931,47 @@ input[type=range]:focus-visible, .sl-value:focus-visible, .split-handle:focus-vi
   font-size: 11px; color: var(--muted);
   margin-left: auto;
 }
+.meta-mini {
+  position: relative;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.info-btn {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; font-style: italic;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0;
+}
+.info-btn.on { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
+.info-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 11px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: normal;
+  width: max-content;
+  max-width: 240px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+}
 .stage-inner {
   flex: 1;
   display: flex;
@@ -3321,10 +3412,29 @@ input.hue::-moz-range-track {
 .mh.hollow { background: var(--panel); border-color: var(--amber); }
 
 @media (max-width: 900px) {
-  .app { height: auto; min-height: 100vh; overflow: visible; }
-  .work { flex-direction: column; }
-  .panel { width: 100%; border-left: none; border-top: 1px solid var(--line); overflow-y: visible; }
-  .canvas { max-height: 48vh; }
+  /* same model as desktop: the app fills the viewport, the image stays
+     pinned, and only the settings panel scrolls */
+  .app { height: 100vh; height: 100dvh; overflow: hidden; }
+  .top { padding: 10px 12px; gap: 8px; }
+  .top-actions { gap: 6px; }
+  .stage-tools { gap: 6px; padding: 10px 12px 0; }
+  .btn.small { padding: 6px 10px; font-size: 12px; }
+  .btn { padding: 8px 12px; font-size: 13px; }
+  .crop-bar { padding: 8px 12px 0; gap: 8px; }
+  .crop-bar input[type=range] { width: 130px; }
+  .brand-tag { display: none; }
+  .work { flex-direction: column; min-height: 0; }
+  .stage { flex: 0 0 auto; }
+  .stage-inner { min-height: 0; padding: 10px; }
+  .panel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+  }
+  .canvas { max-height: 40vh; }
   .export-panel { right: auto; left: 0; }
 }
 
@@ -3336,6 +3446,8 @@ input.hue::-moz-range-track {
   .empty-actions { justify-content: center; }
   .hero-demo { width: 100%; }
 }
+
+
 
 @media (max-width: 480px) {
   .empty { padding: 16px; }
