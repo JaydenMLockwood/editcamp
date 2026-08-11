@@ -446,6 +446,10 @@ export default function App() {
     () => window.matchMedia("(pointer: coarse)").matches
   );
   const [infoOpen, setInfoOpen] = useState(false);
+  const [heartOnly, setHeartOnly] = useState(false);
+  const brandRef = useRef(null);
+  const actionsRef = useRef(null);
+  const collapseAtRef = useRef(0);
   const historyRef = useRef({ stack: [], idx: -1 });
   const applyingHistRef = useRef(false);
   const applyHistoryRef = useRef(() => {});
@@ -949,6 +953,31 @@ export default function App() {
       setErr("Couldn't load edits: " + (ex && ex.message ? ex.message : String(ex)));
     }
   };
+
+  /* collapse "Support" to just the heart only when the header row would
+     otherwise wrap under the logo; restore it (with hysteresis) when space
+     returns */
+  useEffect(() => {
+    const check = () => {
+      const b = brandRef.current;
+      const a = actionsRef.current;
+      if (!b || !a) return;
+      if (!heartOnly) {
+        if (a.offsetTop > b.offsetTop + 4) {
+          collapseAtRef.current = window.innerWidth;
+          setHeartOnly(true);
+        }
+      } else if (window.innerWidth > collapseAtRef.current + 40) {
+        setHeartOnly(false);
+      }
+    };
+    const id = requestAnimationFrame(check);
+    window.addEventListener("resize", check);
+    return () => {
+      cancelAnimationFrame(id);
+      window.removeEventListener("resize", check);
+    };
+  }, [heartOnly, imgInfo]);
 
   useEffect(() => {
     const mN = window.matchMedia("(max-width: 900px)");
@@ -1881,7 +1910,7 @@ export default function App() {
       <style>{CSS}</style>
 
       <header className="top">
-        <div className="brand">
+        <div className="brand" ref={brandRef}>
           <svg
             className="brand-logo"
             viewBox="0 0 20 20"
@@ -1903,7 +1932,7 @@ export default function App() {
           <span className="brand-name">EditCamp</span>
           <span className="brand-tag">RAW editing made easy</span>
         </div>
-        <div className="top-actions">
+        <div className="top-actions" ref={actionsRef}>
           {DONATE_URL && (
             <a
               className="btn ghost small support-btn"
@@ -1911,7 +1940,8 @@ export default function App() {
               target="_blank"
               rel="noopener noreferrer"
             >
-              <span className="support-heart">{"♥"}</span> Support
+              <span className="support-heart">{"♥"}</span>
+              {!heartOnly && " Support"}
             </a>
           )}
           {imgInfo && (
