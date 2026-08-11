@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { createPipeline, processFull, resizeRGBA, canvasToBlob, downloadBlob, MIX_BANDS } from "./pipeline.js";
 import { applyCrop } from "./crop.js";
+import { tagJpeg, tagPng } from "./metadata.js";
+
 import { loadFile, isRawFile, formatMeta, RAW_EXTS } from "./loader.js";
 
 /* ------------------------------------------------------------------ */
@@ -144,6 +146,49 @@ const PRESETS = [
   ["Faded film", { contrast: -10, blacks: 20, saturation: -20, grain: 35, st_sh_hue: 55, st_sh_amt: 15 }],
   ["B&W", { saturation: -100, contrast: 20, clarity: 15, grain: 20 }],
 ];
+
+const DONATE_URL = "https://ko-fi.com/editcamp";
+
+/* Tiny IndexedDB key-value store for the local session (photo + edits).
+   localStorage can't hold RAW files; IndexedDB handles large blobs fine. */
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open("editcamp", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("kv");
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+function saveOptedOut() {
+  return localStorage.getItem("ec_no_save") === "1";
+}
+async function idbSet(key, value) {
+  if (saveOptedOut()) return;
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(value, key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const req = db.transaction("kv", "readonly").objectStore("kv").get(key);
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+async function idbClear() {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").clear();
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
 
 const ESSENTIALS = [
   "temperature", "tint", "exposure", "contrast",
@@ -388,6 +433,14 @@ export default function App() {
   const [clipShow, setClipShow] = useState(false);
   const [cropAspect, setCropAspect] = useState(null);
   const [hasPrevEdit, setHasPrevEdit] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(
+    () => !localStorage.getItem("ec_privacy_ok")
+  );
+  const restoredRef = useRef(false);
+  const historyRef = useRef({ stack: [], idx: -1 });
+  const applyingHistRef = useRef(false);
+  const applyHistoryRef = useRef(() => {});
+  const [, setHistTick] = useState(0);
   const [openGroups, setOpenGroups] = useState({
     wb: true,
     light: true,
@@ -424,6 +477,12 @@ export default function App() {
   const prevEditRef = useRef(null);
   const clipCanvasRef = useRef(null);
   const clipWorkRef = useRef(null);
+  const sampleRef = useRef(null);
+  const demoBeforeRef = useRef(null);
+  const demoAfterRef = useRef(null);
+  const demoWrapRef = useRef(null);
+  const demoLineRef = useRef(null);
+  const [demoPos, setDemoPos] = useState(null); /* null = auto-sweeping */
   const fileNameRef = useRef("photo");
 
   adjRef.current = adj;
@@ -561,6 +620,7 @@ export default function App() {
       }
     }
     originalRef.current = full;
+    historyRef.current = { stack: [], idx: -1 };
     cropParamsRef.current = null;
     setCropApplied(false);
     setCropMode(false);
@@ -587,6 +647,8 @@ export default function App() {
     try {
       const full = await loadFile(f, setBusyMsg);
       setSource(full, f.name);
+      /* remember this photo locally so the next visit resumes here */
+      idbSet("lastFile", { name: f.name, blob: f }).catch(() => {});
     } catch (ex) {
       setErr(
         "Couldn't load that file: " +
@@ -596,14 +658,178 @@ export default function App() {
     setBusyMsg(null);
   };
 
-  const useSample = () => {
+  /* Robust loader for images in public/: root-path fetch, HTML-fallback
+     guard, two decode paths, and a black-decode probe. Errors are surfaced
+     with the exact filename so problems are visible, never silent. */
+  const loadPublicImage = useCallback(async (names) => {
+    for (const name of names) {
+      try {
+        const resp = await fetch(`/${name}`);
+        const type = (resp.headers.get("content-type") || "").toLowerCase();
+        if (!resp.ok || type.includes("text/html")) continue;
+        const blob = await resp.blob();
+        let src = await createImageBitmap(blob).catch(() => null);
+        if (!src) {
+          src = await new Promise((res) => {
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => {
+              URL.revokeObjectURL(url);
+              res(img);
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(url);
+              res(null);
+            };
+            img.src = url;
+          });
+        }
+        if (!src) {
+          setErr(`${name} was found but couldn't be decoded. Re-export it as a standard JPG (RAW or HEIC renamed to .jpg won't work).`);
+          return null;
+        }
+        const sw = src.width || src.naturalWidth;
+        const sh = src.height || src.naturalHeight;
+        const MAX = 1600;
+        const sc = Math.min(1, MAX / Math.max(sw, sh));
+        const cv = document.createElement("canvas");
+        cv.width = Math.max(1, Math.round(sw * sc));
+        cv.height = Math.max(1, Math.round(sh * sc));
+        cv.getContext("2d").drawImage(src, 0, 0, cv.width, cv.height);
+        src.close && src.close();
+        const probe = document.createElement("canvas");
+        probe.width = 32;
+        probe.height = 32;
+        probe.getContext("2d").drawImage(cv, 0, 0, 32, 32);
+        const pd = probe.getContext("2d").getImageData(0, 0, 32, 32).data;
+        let maxV = 0;
+        for (let i = 0; i < pd.length; i += 4) {
+          maxV = Math.max(maxV, pd[i], pd[i + 1], pd[i + 2]);
+        }
+        if (maxV < 10) {
+          setErr(`${name} decoded as a black image. Re-export it as a standard sRGB JPG and replace the file.`);
+          return null;
+        }
+        return cv;
+      } catch (e) {
+        /* not present; try the next name */
+      }
+    }
+    return null;
+  }, []);
+
+  /* before/practice photo: sample1.jpg (sample.jpg also accepted) */
+  const getSampleCanvas = useCallback(async () => {
+    if (sampleRef.current) return sampleRef.current;
+    let cv = await loadPublicImage(["sample1.jpg", "sample.jpg"]);
+    if (!cv) {
+      const sm = makeSample();
+      cv = document.createElement("canvas");
+      cv.width = sm.width;
+      cv.height = sm.height;
+      cv.getContext("2d").putImageData(new ImageData(sm.data, sm.width, sm.height), 0, 0);
+    }
+    sampleRef.current = cv;
+    return cv;
+  }, [loadPublicImage]);
+
+  const useSample = async () => {
     setErr(null);
     try {
-      setSource(makeSample(), "sample-landscape");
+      const cv = await getSampleCanvas();
+      const id = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height);
+      setSource({ data: id.data, width: id.width, height: id.height, meta: null }, "sample-photo");
     } catch (ex) {
       setErr("Sample failed: " + (ex && ex.message ? ex.message : String(ex)));
     }
   };
+
+  useEffect(() => {
+    if (imgInfo || demoPos !== null) return;
+    let raf;
+    const start = performance.now();
+    const tick = (now) => {
+      const after = demoAfterRef.current;
+      const line = demoLineRef.current;
+      if (after && line) {
+        const p = 50 + 50 * Math.cos(((now - start) / 8000) * Math.PI * 2);
+        after.style.clipPath = `inset(0 0 0 ${p}%)`;
+        line.style.left = `${p}%`;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [imgInfo, demoPos]);
+
+  const startDemoDrag = (e) => {
+    if (!demoWrapRef.current) return;
+    e.preventDefault();
+    const move = (ev) => {
+      const r = demoWrapRef.current.getBoundingClientRect();
+      const cx = ev.touches ? ev.touches[0].clientX : ev.clientX;
+      setDemoPos(Math.max(0, Math.min(100, ((cx - r.left) / r.width) * 100)));
+    };
+    move(e);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  /* landing-page demo: your sample1 (before) vs your sample2 (after).
+     Without a sample2, the after side is generated by the real pipeline. */
+  useEffect(() => {
+    if (imgInfo) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const beforeCv = await getSampleCanvas();
+        if (cancelled) return;
+        const b = demoBeforeRef.current;
+        const a = demoAfterRef.current;
+        if (!b || !a) return;
+        const W = 640;
+        const H = Math.round(beforeCv.height * (W / beforeCv.width));
+        b.width = W;
+        b.height = H;
+        b.getContext("2d").drawImage(beforeCv, 0, 0, W, H);
+
+        const afterCv = await loadPublicImage(["sample2.jpg"]);
+        if (cancelled) return;
+        a.width = W;
+        a.height = H;
+        if (afterCv) {
+          a.getContext("2d").drawImage(afterCv, 0, 0, W, H);
+        } else {
+          const off = document.createElement("canvas");
+          off.width = W;
+          off.height = H;
+          const pipe = createPipeline(off);
+          if (!pipe) return;
+          const small = document.createElement("canvas");
+          small.width = W;
+          small.height = H;
+          const sx = small.getContext("2d");
+          sx.drawImage(beforeCv, 0, 0, W, H);
+          pipe.setSource(sx.getImageData(0, 0, W, H));
+          pipe.render(
+            { ...DEFAULTS, temperature: 16, exposure: 14, contrast: 24, highlights: -35, shadows: 28, blacks: -8, vibrance: 30 },
+            { flip: 1 }
+          );
+          a.getContext("2d").drawImage(off, 0, 0);
+          pipe.dispose();
+        }
+      } catch (e) {
+        /* the demo is decorative; fail silently */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [imgInfo, getSampleCanvas, loadPublicImage]);
 
   const toggleGroup = (g) => setOpenGroups((o) => ({ ...o, [g]: !o[g] }));
 
@@ -649,7 +875,8 @@ export default function App() {
       });
       setBusyMsg("Encoding…");
       const type = exportFmt === "png" ? "image/png" : "image/jpeg";
-      const blob = await canvasToBlob(cv, type, 0.92);
+      let blob = await canvasToBlob(cv, type, 0.92);
+      blob = exportFmt === "png" ? await tagPng(blob) : await tagJpeg(blob);
       downloadBlob(blob, `${fileNameRef.current}_edited.${exportFmt}`);
     } catch (ex) {
       setErr("Export failed: " + (ex && ex.message ? ex.message : String(ex)));
@@ -712,6 +939,141 @@ export default function App() {
       setErr("Couldn't load edits: " + (ex && ex.message ? ex.message : String(ex)));
     }
   };
+
+  /* undo/redo: snapshot the full edit state (sliders, masks, crop) after
+     each settled change. Debounced so a slider drag is one history entry. */
+  const snapNow = () => ({
+    adj: { ...adjRef.current },
+    masks: masksRef.current.map((m) => ({ ...m, adj: { ...m.adj } })),
+    crop: cropParamsRef.current
+      ? { ...cropParamsRef.current, Pc: { ...cropParamsRef.current.Pc } }
+      : null,
+  });
+
+  useEffect(() => {
+    if (!imgInfo || applyingHistRef.current) return;
+    const t = setTimeout(() => {
+      if (applyingHistRef.current) return;
+      const hst = historyRef.current;
+      const snap = snapNow();
+      const key = JSON.stringify(snap);
+      if (hst.idx >= 0 && JSON.stringify(hst.stack[hst.idx]) === key) return;
+      hst.stack = hst.stack.slice(0, hst.idx + 1);
+      hst.stack.push(snap);
+      if (hst.stack.length > 50) hst.stack.shift();
+      hst.idx = hst.stack.length - 1;
+      setHistTick((t2) => t2 + 1);
+    }, 500);
+    return () => clearTimeout(t);
+  }, [adj, masks, srcVersion, imgInfo]);
+
+  const applyHistory = (dir) => {
+    const hst = historyRef.current;
+    const ni = hst.idx + dir;
+    if (ni < 0 || ni >= hst.stack.length) return;
+    hst.idx = ni;
+    const snap = hst.stack[ni];
+    applyingHistRef.current = true;
+    const finish = () => {
+      setTimeout(() => {
+        applyingHistRef.current = false;
+      }, 800);
+      setHistTick((t2) => t2 + 1);
+    };
+    setAdj({ ...snap.adj });
+    setMasks(snap.masks.map((m) => ({ ...m, adj: { ...m.adj } })));
+    setSelMask(null);
+    const curCrop = JSON.stringify(cropParamsRef.current);
+    const snapCrop = JSON.stringify(snap.crop);
+    if (curCrop !== snapCrop && originalRef.current) {
+      if (!snap.crop) {
+        cropParamsRef.current = null;
+        setCropApplied(false);
+        refreshWorking(originalRef.current);
+        finish();
+      } else {
+        setBusyMsg("Applying…");
+        setTimeout(() => {
+          try {
+            const res = applyCrop(
+              originalRef.current,
+              snap.crop.angleRad,
+              snap.crop.Pc,
+              snap.crop.cw,
+              snap.crop.ch
+            );
+            cropParamsRef.current = snap.crop;
+            setCropApplied(true);
+            refreshWorking(res);
+          } catch (e) {
+            /* best effort */
+          }
+          setBusyMsg(null);
+          finish();
+        }, 30);
+      }
+    } else {
+      finish();
+    }
+  };
+  applyHistoryRef.current = applyHistory;
+
+  /* autosave the session edits locally, debounced */
+  useEffect(() => {
+    if (!imgInfo) return;
+    const t = setTimeout(() => {
+      idbSet("lastEdit", {
+        adj: adjRef.current,
+        masks: masksRef.current,
+        crop: cropParamsRef.current,
+      }).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [adj, masks, cropApplied, imgInfo]);
+
+  /* restore the previous session on first mount, skipping the landing page */
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    (async () => {
+      try {
+        const saved = await idbGet("lastFile");
+        if (!saved || !saved.blob) return;
+        setBusyMsg("Restoring your last session…");
+        const file = new File([saved.blob], saved.name || "photo");
+        const full = await loadFile(file, setBusyMsg);
+        setSource(full, file.name);
+        const edit = await idbGet("lastEdit");
+        if (edit && edit.adj) {
+          const next = { ...DEFAULTS };
+          for (const k of Object.keys(next)) {
+            const v = Number(edit.adj[k]);
+            if (Number.isFinite(v)) next[k] = Math.max(-100, Math.min(100, v));
+          }
+          if (edit.crop && edit.crop.Pc && originalRef.current) {
+            try {
+              const cp = edit.crop;
+              const res = applyCrop(originalRef.current, cp.angleRad, cp.Pc, cp.cw, cp.ch);
+              cropParamsRef.current = cp;
+              setCropApplied(true);
+              refreshWorking(res);
+            } catch (e) {
+              /* crop restore is best-effort */
+            }
+          }
+          setAdj(next);
+          if (Array.isArray(edit.masks)) {
+            const loaded = edit.masks.filter((m) => m && m.id && m.type && m.adj);
+            setMasks(loaded);
+            maskCounter.current = loaded.reduce((mx, m) => Math.max(mx, m.id), 0);
+          }
+        }
+      } catch (e) {
+        /* no saved session or restore failed; land normally */
+      }
+      setBusyMsg(null);
+    })();
+  }, [loadFile, setSource, refreshWorking]);
 
   /* ------------------------- colour picking ------------------------- */
 
@@ -1252,6 +1614,16 @@ export default function App() {
   /* classic zoom key binds: + / - / 0 */
   useEffect(() => {
     const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        applyHistoryRef.current(e.shiftKey ? 1 : -1);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || e.key === "Y")) {
+        e.preventDefault();
+        applyHistoryRef.current(1);
+        return;
+      }
       const t = e.target;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (cropModeRef.current) return;
@@ -1508,8 +1880,19 @@ export default function App() {
           <span className="brand-name">EditCamp</span>
           <span className="brand-tag">RAW editing made easy</span>
         </div>
-        {imgInfo && (
-          <div className="top-actions">
+        <div className="top-actions">
+          {DONATE_URL && (
+            <a
+              className="btn ghost small support-btn"
+              href={DONATE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span className="support-heart">{"♥"}</span> Support
+            </a>
+          )}
+          {imgInfo && (
+            <>
             <div className="export-anchor">
               <button
                 className={"btn small" + (exportOpen ? " active" : "")}
@@ -1598,12 +1981,48 @@ export default function App() {
             >
               Revert to original
             </button>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </header>
 
       <input id="sf-file" type="file" accept={ACCEPT} onChange={onFile} className="vhide" />
       <input id="sf-edits" type="file" accept=".json,application/json" onChange={onLoadEdits} className="vhide" />
+
+      {showPrivacy && (
+        <div className="privacy-note">
+          <div className="privacy-text">
+            EditCamp runs entirely on your device. Photos are never uploaded
+            anywhere. Your current photo and edits are saved in this browser
+            only, so you can pick up where you left off. No cookies, no
+            tracking, no analytics.
+          </div>
+          <div className="privacy-actions">
+            <button
+              className="btn small ghost"
+              onClick={async () => {
+                localStorage.setItem("ec_no_save", "1");
+                try {
+                  await idbClear();
+                } catch (e) { /* nothing stored */ }
+                localStorage.setItem("ec_privacy_ok", "1");
+                setShowPrivacy(false);
+              }}
+            >
+              Don't save my work
+            </button>
+            <button
+              className="btn small primary"
+              onClick={() => {
+                localStorage.setItem("ec_privacy_ok", "1");
+                setShowPrivacy(false);
+              }}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
 
       {busyMsg && (
         <div className="busy-overlay">
@@ -1620,27 +2039,62 @@ export default function App() {
 
       {!imgInfo ? (
         <div className="empty">
-          <div className="empty-card">
-            <h1>Develop your first photo</h1>
-            <p>
-              Load a photo, including real camera RAW files, and EditCamp walks
-              you through the editing loop that professionals use, one adjustment at a
-              time, with a live before/after so you can see exactly what each move does.
-            </p>
-            <div className="empty-actions">
-              <label className="btn primary" htmlFor="sf-file" role="button" tabIndex={0}>
-                Upload a photo
-              </label>
-              <button className="btn" onClick={useSample}>
-                Practice on the sample landscape
-              </button>
+          <div className="hero">
+            <div className="hero-copy">
+              <h1>Develop your first photo</h1>
+              <p>
+                Upload any photo, even camera RAW, and EditCamp walks you
+                through the professional editing loop one step at a time.
+              </p>
+              <div className="empty-actions">
+                <label className="btn primary" htmlFor="sf-file" role="button" tabIndex={0}>
+                  Upload a photo
+                </label>
+                <button className="btn" onClick={useSample}>
+                  Practice on the sample photo
+                </button>
+              </div>
+              {err && <div className="err-banner">{err}</div>}
+              <p className="fine">
+                Supports JPG, PNG, WebP and camera RAW: ARW, CR2, CR3, NEF, RAF,
+                DNG and more. Everything stays on your device.
+              </p>
             </div>
-            {err && <div className="err-banner">{err}</div>}
-            <p className="fine">
-              Supported: Sony ARW, Canon CR2/CR3, Nikon NEF, Fuji RAF, DNG and most
-              other camera RAW formats, plus regular JPG, PNG and WebP. Everything
-              runs on your device; nothing is uploaded.
-            </p>
+            <div className="hero-demo">
+              <div
+                className="demo-wrap"
+                ref={demoWrapRef}
+                onPointerDown={startDemoDrag}
+              >
+                <canvas ref={demoBeforeRef} className="demo-canvas" />
+                <canvas
+                  ref={demoAfterRef}
+                  className="demo-canvas demo-after"
+                  style={demoPos !== null ? { clipPath: `inset(0 0 0 ${demoPos}%)` } : undefined}
+                />
+                <div
+                  ref={demoLineRef}
+                  className="demo-line"
+                  style={demoPos !== null ? { left: `${demoPos}%` } : undefined}
+                  role="slider"
+                  aria-label="Before/after comparison"
+                  aria-valuenow={demoPos === null ? 50 : Math.round(demoPos)}
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    const cur = demoPos === null ? 50 : demoPos;
+                    if (e.key === "ArrowLeft") setDemoPos(Math.max(0, cur - 4));
+                    if (e.key === "ArrowRight") setDemoPos(Math.min(100, cur + 4));
+                  }}
+                >
+                  <div className="demo-grip">{"↔"}</div>
+                </div>
+                <span className="chip chip-l">Before</span>
+                <span className="chip chip-r">After</span>
+              </div>
+              <div className="demo-cap">
+                Drag the handle to compare before and after
+              </div>
+            </div>
           </div>
         </div>
       ) : (
@@ -1648,6 +2102,24 @@ export default function App() {
           <div className="stage">
             {err && <div className="err-banner in-stage">{err}</div>}
             <div className="stage-tools">
+              <button
+                className="btn small"
+                disabled={historyRef.current.idx <= 0}
+                title="Undo (Ctrl+Z)"
+                aria-label="Undo"
+                onClick={() => applyHistory(-1)}
+              >
+                {"↩"}
+              </button>
+              <button
+                className="btn small"
+                disabled={historyRef.current.idx >= historyRef.current.stack.length - 1}
+                title="Redo (Ctrl+Shift+Z)"
+                aria-label="Redo"
+                onClick={() => applyHistory(1)}
+              >
+                {"↪"}
+              </button>
               <button
                 className={"btn small" + (split ? " active" : "")}
                 aria-pressed={split}
@@ -2266,6 +2738,21 @@ input[type=range]:focus-visible, .sl-value:focus-visible, .split-handle:focus-vi
 }
 .err-banner.in-stage { margin: 12px 16px 0; }
 
+.privacy-note {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  z-index: 60;
+  max-width: 620px; width: calc(100% - 32px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.55);
+  display: flex; align-items: center; gap: 14px;
+  flex-wrap: wrap;
+}
+.privacy-text { flex: 1; min-width: 240px; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.privacy-actions { display: flex; gap: 8px; }
+
 .busy-overlay {
   position: fixed; inset: 0; z-index: 50;
   background: rgba(10, 10, 12, 0.72);
@@ -2319,12 +2806,64 @@ input[type=range]:focus-visible, .sl-value:focus-visible, .split-handle:focus-vi
 .ex-pair { display: flex; gap: 8px; }
 .ex-pair .btn { flex: 1; }
 
-.empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
-.empty-card { max-width: 540px; text-align: center; }
-.empty-card h1 { font-size: 28px; font-weight: 700; margin: 0 0 12px; letter-spacing: -0.01em; }
-.empty-card p { color: var(--muted); line-height: 1.55; margin: 0 0 22px; font-size: 15px; }
+.empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; overflow-y: auto; }
+.hero {
+  display: flex; align-items: center; gap: 48px;
+  max-width: 1040px;
+}
+.hero-copy { max-width: 440px; }
+.hero-copy h1 {
+  font-size: clamp(24px, 3.4vw, 32px);
+  font-weight: 700;
+  margin: 0 0 10px;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.hero-copy p {
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0 0 20px;
+  font-size: clamp(13.5px, 1.5vw, 15px);
+}
+.hero-demo { flex: 1; min-width: 0; max-width: 520px; }
+.demo-wrap {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  line-height: 0;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  border: 1px solid var(--line);
+}
+.demo-canvas { width: 100%; height: auto; display: block; }
+.demo-after {
+  position: absolute; inset: 0;
+  clip-path: inset(0 0 0 50%);
+}
+.demo-wrap { cursor: ew-resize; touch-action: none; user-select: none; }
+.demo-line {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 0 8px rgba(0,0,0,0.6);
+}
+.demo-grip {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--amber); color: #1a1408;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  pointer-events: none;
+}
+.demo-cap {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; color: var(--muted);
+  text-align: center;
+  margin-top: 10px;
+  letter-spacing: 0.05em;
+}
 .empty-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 20px; }
-.fine { font-size: 12.5px !important; opacity: 0.8; }
+.fine { font-size: 12px !important; opacity: 0.75; margin-top: 16px !important; }
 
 .work { flex: 1; display: flex; min-height: 0; }
 .stage {
@@ -2648,6 +3187,10 @@ input.hue::-moz-range-track {
 .ess { display: flex; flex-direction: column; }
 .auto-btn { margin: 0 0 16px; }
 
+.support-btn { text-decoration: none; color: var(--muted); }
+.support-btn:hover { color: var(--text); }
+.support-heart { color: var(--amber); margin-right: 2px; }
+
 .wb-pick { margin-bottom: 14px; text-align: left; }
 .wb-pick-compact { margin-bottom: 12px; }
 .pick-hint {
@@ -2783,7 +3326,23 @@ input.hue::-moz-range-track {
   .export-panel { right: auto; left: 0; }
 }
 
+@media (max-width: 980px) {
+  .hero { flex-direction: column-reverse; gap: 24px; text-align: center; }
+  .hero-copy { max-width: 520px; }
+  .hero-copy p { margin-left: auto; margin-right: auto; max-width: 420px; }
+  .fine { max-width: 400px; margin-left: auto !important; margin-right: auto !important; }
+  .empty-actions { justify-content: center; }
+  .hero-demo { width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .empty { padding: 16px; }
+  .hero { gap: 18px; }
+  .empty-actions { flex-direction: column; align-items: stretch; }
+  .empty-actions .btn { width: 100%; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  * { transition: none !important; animation: none !important; }
 }
 `;

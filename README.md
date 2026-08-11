@@ -43,6 +43,27 @@ npm run dev -- --host
 The terminal will print a "Network" URL — open that on your phone. Note that
 very large RAW files (50+ megapixels) may be too much for older phones.
 
+## Static assets: sample photo and favicon
+
+Both live in the `public` folder at the project root (next to
+`index.html`), which Vite serves at the site root:
+
+- `public/sample1.jpg` — your UNEDITED photo, used exactly as provided
+  (the name `sample.jpg` also works). It's the practice photo and the
+  "before" side of the landing demo. Straight-off-the-camera flat looks
+  best. Without it, a built-in illustration is used.
+- `public/sample2.jpg` — your EDITED version of the same photo, the
+  "after" side of the landing demo. Export it at the same dimensions as
+  sample1. If absent, the app generates the after side automatically.
+- `public/favicon.png` — your site icon, referenced from `index.html`.
+
+IMPORTANT: after adding a NEW file to `public`, restart the dev server
+(Ctrl+C, then `npm run dev`) — Vite can serve the app's fallback page
+instead of newly-added public files until restarted. Verify by opening
+`http://localhost:5173/sample.jpg` directly (use the port your terminal
+actually prints). Favicons also cache aggressively in browsers; a hard
+refresh or browser restart shows the new icon.
+
 ## Using the app
 
 - **Upload a photo** — a RAW file straight from your camera works best, but a
