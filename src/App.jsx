@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { createPipeline, processFull, resizeRGBA, canvasToBlob, downloadBlob, MIX_BANDS } from "./pipeline.js";
 import { applyCrop } from "./crop.js";
 import { tagJpeg, tagPng } from "./metadata.js";
+import { ingestFolder, createThumbQueue } from "./folder.js";
+import { makeZip } from "./zip.js";
 
 import { loadFile, isRawFile, formatMeta, RAW_EXTS } from "./loader.js";
 
@@ -446,10 +448,21 @@ export default function App() {
     () => window.matchMedia("(pointer: coarse)").matches
   );
   const [infoOpen, setInfoOpen] = useState(false);
-  const [heartOnly, setHeartOnly] = useState(false);
-  const brandRef = useRef(null);
-  const actionsRef = useRef(null);
-  const collapseAtRef = useRef(0);
+  const [folder, setFolder] = useState(null);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [currentPhotoId, setCurrentPhotoId] = useState(null);
+  const [thumbs, setThumbs] = useState({});
+  const [editedIds, setEditedIds] = useState(() => new Set());
+  const [batch, setBatch] = useState(null);
+  const [photoMenuOpen, setPhotoMenuOpen] = useState(false);
+  const [shareToast, setShareToast] = useState(null);
+  const [shareCopied, setShareCopied] = useState(false);
+  const folderEditsRef = useRef(new Map());
+  const thumbQueueRef = useRef(null);
+  const galleryGridRef = useRef(null);
+  const pipeCanvasRef = useRef(null);
+  const folderStateRef = useRef(null);
+  const currentPhotoIdRef = useRef(null);
   const historyRef = useRef({ stack: [], idx: -1 });
   const applyingHistRef = useRef(false);
   const applyHistoryRef = useRef(() => {});
@@ -499,6 +512,8 @@ export default function App() {
   const fileNameRef = useRef("photo");
 
   adjRef.current = adj;
+  folderStateRef.current = folder;
+  currentPhotoIdRef.current = currentPhotoId;
   zoomRef.current = zoom;
   cropModeRef.current = cropMode;
   masksRef.current = masks;
@@ -582,8 +597,13 @@ export default function App() {
       oc.height = preview.height;
       oc.getContext("2d").putImageData(preview, 0, 0);
 
+      if (pipeRef.current && pipeCanvasRef.current !== glc) {
+        pipeRef.current.dispose();
+        pipeRef.current = null;
+      }
       if (!pipeRef.current) {
         pipeRef.current = createPipeline(glc);
+        pipeCanvasRef.current = glc;
         if (!pipeRef.current) {
           setErr(
             "Your browser blocked WebGL, which this editor needs for live processing. Check that hardware acceleration is enabled."
@@ -597,7 +617,7 @@ export default function App() {
     } catch (ex) {
       setErr("Setup failed: " + (ex && ex.message ? ex.message : String(ex)));
     }
-  }, [srcVersion, render, scheduleHist]);
+  }, [srcVersion, galleryOpen, render, scheduleHist]);
 
   useEffect(() => {
     if (!imgInfo) return;
@@ -655,6 +675,7 @@ export default function App() {
     const f = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!f) return;
+    if (folderStateRef.current) closeFolder();
     setErr(null);
     setBusyMsg(isRawFile(f.name) ? "Reading file…" : "Loading…");
     setProgress(null);
@@ -892,6 +913,7 @@ export default function App() {
       let blob = await canvasToBlob(cv, type, 0.92);
       blob = exportFmt === "png" ? await tagPng(blob) : await tagJpeg(blob);
       downloadBlob(blob, `${fileNameRef.current}_edited.${exportFmt}`);
+      bumpExports(1);
     } catch (ex) {
       setErr("Export failed: " + (ex && ex.message ? ex.message : String(ex)));
     }
@@ -954,31 +976,6 @@ export default function App() {
     }
   };
 
-  /* collapse "Support" to just the heart only when the header row would
-     otherwise wrap under the logo; restore it (with hysteresis) when space
-     returns */
-  useEffect(() => {
-    const check = () => {
-      const b = brandRef.current;
-      const a = actionsRef.current;
-      if (!b || !a) return;
-      if (!heartOnly) {
-        if (a.offsetTop > b.offsetTop + 4) {
-          collapseAtRef.current = window.innerWidth;
-          setHeartOnly(true);
-        }
-      } else if (window.innerWidth > collapseAtRef.current + 40) {
-        setHeartOnly(false);
-      }
-    };
-    const id = requestAnimationFrame(check);
-    window.addEventListener("resize", check);
-    return () => {
-      cancelAnimationFrame(id);
-      window.removeEventListener("resize", check);
-    };
-  }, [heartOnly, imgInfo]);
-
   useEffect(() => {
     const mN = window.matchMedia("(max-width: 900px)");
     const mT = window.matchMedia("(pointer: coarse)");
@@ -991,6 +988,15 @@ export default function App() {
       mT.removeEventListener("change", onT);
     };
   }, []);
+
+  useEffect(() => {
+    if (!photoMenuOpen) return;
+    const onDoc = (e) => {
+      if (!e.target.closest(".menu-anchor")) setPhotoMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onDoc);
+    return () => document.removeEventListener("pointerdown", onDoc);
+  }, [photoMenuOpen]);
 
   /* undo/redo: snapshot the full edit state (sliders, masks, crop) after
      each settled change. Debounced so a slider drag is one history entry. */
@@ -1074,6 +1080,10 @@ export default function App() {
   useEffect(() => {
     if (!imgInfo) return;
     const t = setTimeout(() => {
+      if (folderStateRef.current) {
+        storeCurrentEdits();
+        return;
+      }
       idbSet("lastEdit", {
         adj: adjRef.current,
         masks: masksRef.current,
@@ -1126,6 +1136,345 @@ export default function App() {
       setBusyMsg(null);
     })();
   }, [loadFile, setSource, refreshWorking]);
+
+  /* ----------------------------- folder ----------------------------- */
+
+  const editIsDefault = (snap) =>
+    JSON.stringify(snap.adj) === JSON.stringify(DEFAULTS) &&
+    snap.masks.length === 0 &&
+    !snap.crop;
+
+  const saveFolderEditsToIdb = () => {
+    const f = folderStateRef.current;
+    if (!f) return;
+    const obj = {};
+    for (const [id, snap] of folderEditsRef.current) {
+      const p = f.photos[id];
+      if (p) obj[p.name] = snap;
+    }
+    idbSet(`folderEdits:${f.name}`, obj).catch(() => {});
+  };
+
+  const storeCurrentEdits = () => {
+    const f = folderStateRef.current;
+    const id = currentPhotoIdRef.current;
+    if (!f || id === null) return;
+    const snap = snapNow();
+    if (editIsDefault(snap)) {
+      folderEditsRef.current.delete(id);
+      setEditedIds((prev) => {
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
+    } else {
+      folderEditsRef.current.set(id, snap);
+      setEditedIds((prev) => new Set(prev).add(id));
+    }
+    saveFolderEditsToIdb();
+  };
+
+  const applyEditSnapshot = (snap) => {
+    if (snap.crop && snap.crop.Pc && originalRef.current) {
+      try {
+        const cp = snap.crop;
+        const res = applyCrop(originalRef.current, cp.angleRad, cp.Pc, cp.cw, cp.ch);
+        cropParamsRef.current = cp;
+        setCropApplied(true);
+        refreshWorking(res);
+      } catch (e) {
+        /* best effort */
+      }
+    }
+    const next = { ...DEFAULTS };
+    for (const k of Object.keys(next)) {
+      const v = Number(snap.adj && snap.adj[k]);
+      if (Number.isFinite(v)) next[k] = Math.max(-100, Math.min(100, v));
+    }
+    setAdj(next);
+    if (Array.isArray(snap.masks)) {
+      const loaded = snap.masks
+        .filter((m) => m && m.id && m.type && m.adj)
+        .map((m) => ({ ...m, adj: { ...m.adj } }));
+      setMasks(loaded);
+      maskCounter.current = loaded.reduce((mx, m) => Math.max(mx, m.id), 0);
+    }
+  };
+
+  const onFolder = (e) => {
+    const list = e.target.files;
+    e.target.value = "";
+    if (!list || !list.length) return;
+    storeCurrentEdits();
+    const f = ingestFolder(list);
+    if (!f.photos.length) {
+      setErr("No supported photos were found in that folder.");
+      return;
+    }
+    setErr(null);
+    if (thumbQueueRef.current) thumbQueueRef.current.clear();
+    thumbQueueRef.current = createThumbQueue(2);
+    for (const url of Object.values(thumbs)) {
+      if (url && url !== "pending" && url !== "failed") URL.revokeObjectURL(url);
+    }
+    folderEditsRef.current = new Map();
+    setEditedIds(new Set());
+    setThumbs({});
+    setBatch(null);
+    setCurrentPhotoId(null);
+    setFolder(f);
+    setGalleryOpen(true);
+    idbGet(`folderEdits:${f.name}`)
+      .then((saved) => {
+        if (!saved) return;
+        const m = new Map();
+        const ed = new Set();
+        f.photos.forEach((p) => {
+          if (saved[p.name]) {
+            m.set(p.id, saved[p.name]);
+            ed.add(p.id);
+          }
+        });
+        if (m.size) {
+          folderEditsRef.current = m;
+          setEditedIds(ed);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const openPhoto = async (id) => {
+    const f = folderStateRef.current;
+    if (!f || !f.photos[id]) return;
+    storeCurrentEdits();
+    const photo = f.photos[id];
+    setErr(null);
+    setGalleryOpen(false);
+    setBusyMsg(photo.raw ? "Decoding RAW — big files can take several seconds…" : "Loading…");
+    try {
+      const full = await loadFile(photo.file, setBusyMsg);
+      setSource(full, photo.name);
+      setCurrentPhotoId(id);
+      currentPhotoIdRef.current = id;
+      const saved = folderEditsRef.current.get(id);
+      if (saved) applyEditSnapshot(saved);
+      setThumbs((prev) => {
+        if (prev[id] && prev[id] !== "failed") return prev;
+        const p = previewRef.current;
+        if (!p) return prev;
+        const full2 = document.createElement("canvas");
+        full2.width = p.width;
+        full2.height = p.height;
+        full2.getContext("2d").putImageData(p, 0, 0);
+        const sc = Math.min(1, 320 / Math.max(p.width, p.height));
+        const cv = document.createElement("canvas");
+        cv.width = Math.max(1, Math.round(p.width * sc));
+        cv.height = Math.max(1, Math.round(p.height * sc));
+        cv.getContext("2d").drawImage(full2, 0, 0, cv.width, cv.height);
+        cv.toBlob(
+          (b) => {
+            if (b) setThumbs((pp) => ({ ...pp, [id]: URL.createObjectURL(b) }));
+          },
+          "image/jpeg",
+          0.8
+        );
+        return prev;
+      });
+    } catch (ex) {
+      setErr("Couldn't load that photo: " + (ex && ex.message ? ex.message : String(ex)));
+    }
+    setBusyMsg(null);
+  };
+
+  const closeFolder = () => {
+    storeCurrentEdits();
+    for (const url of Object.values(thumbs)) {
+      if (url && url !== "pending" && url !== "failed") URL.revokeObjectURL(url);
+    }
+    if (thumbQueueRef.current) thumbQueueRef.current.clear();
+    setThumbs({});
+    setFolder(null);
+    setGalleryOpen(false);
+    setBatch(null);
+    setCurrentPhotoId(null);
+  };
+
+  const onCardClick = (id) => {
+    if (!batch) {
+      openPhoto(id);
+      return;
+    }
+    if (batch.stage === "source") {
+      if (!editedIds.has(id)) return;
+      setBatch({ stage: "targets", mode: "apply", sourceId: id, targets: new Set() });
+      return;
+    }
+    if (batch.stage === "targets") {
+      if (batch.mode === "apply" && id === batch.sourceId) return;
+      setBatch((b) => {
+        const t = new Set(b.targets);
+        if (t.has(id)) t.delete(id);
+        else t.add(id);
+        return { ...b, targets: t };
+      });
+    }
+  };
+
+  const selectAllUnedited = () => {
+    const f = folderStateRef.current;
+    if (!f) return;
+    setBatch((b) => {
+      const t = new Set(b.targets);
+      f.photos.forEach((p) => {
+        if (!editedIds.has(p.id) && p.id !== b.sourceId) t.add(p.id);
+      });
+      return { ...b, targets: t };
+    });
+  };
+
+  const selectAllEdited = () => {
+    const f = folderStateRef.current;
+    if (!f) return;
+    setBatch((b) => {
+      const t = new Set(b.targets);
+      f.photos.forEach((p) => {
+        if (editedIds.has(p.id)) t.add(p.id);
+      });
+      return { ...b, targets: t };
+    });
+  };
+
+  const applyBatch = () => {
+    if (!batch || batch.stage !== "targets" || batch.mode !== "apply" || !batch.targets.size) return;
+    let src = folderEditsRef.current.get(batch.sourceId);
+    if (!src && batch.sourceId === currentPhotoIdRef.current) src = snapNow();
+    if (!src) return;
+    const ed = new Set(editedIds);
+    for (const id of batch.targets) {
+      folderEditsRef.current.set(id, JSON.parse(JSON.stringify(src)));
+      ed.add(id);
+    }
+    setEditedIds(ed);
+    if (batch.targets.has(currentPhotoIdRef.current)) {
+      applyEditSnapshot(JSON.parse(JSON.stringify(src)));
+    }
+    saveFolderEditsToIdb();
+    setBatch(null);
+  };
+
+  const runBatchExport = async () => {
+    const f = folderStateRef.current;
+    if (!f || !batch || batch.mode !== "export" || !batch.targets.size) return;
+    const ids = [...batch.targets].sort((a, b) => a - b);
+    setBatch(null);
+    setErr(null);
+    const entries = [];
+    try {
+      const maxEdge = exportSize === "full" ? 0 : exportSize === "large" ? 3000 : 1600;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        const photo = f.photos[id];
+        setBusyMsg(`Exporting ${i + 1} of ${ids.length}: ${photo.name}…`);
+        setProgress(i / ids.length);
+        let full = await loadFile(photo.file, () => {});
+        let edit = folderEditsRef.current.get(id);
+        if (!edit && id === currentPhotoIdRef.current) edit = snapNow();
+        if (edit && edit.crop && edit.crop.Pc) {
+          try {
+            full = applyCrop(full, edit.crop.angleRad, edit.crop.Pc, edit.crop.cw, edit.crop.ch);
+          } catch (e) {
+            /* export uncropped rather than fail */
+          }
+        }
+        const adjE = { ...DEFAULTS, ...(edit && edit.adj ? edit.adj : {}) };
+        const masksE = edit && Array.isArray(edit.masks) ? edit.masks : [];
+        const cv = await processFull(full, adjE, { maxEdge, masks: masksE });
+        const type = exportFmt === "png" ? "image/png" : "image/jpeg";
+        let blob = await canvasToBlob(cv, type, 0.92);
+        blob = exportFmt === "png" ? await tagPng(blob) : await tagJpeg(blob);
+        const base = photo.name.replace(/\.[^.]+$/, "");
+        entries.push({
+          name: `${base}_edited.${exportFmt}`,
+          data: new Uint8Array(await blob.arrayBuffer()),
+        });
+      }
+      setBusyMsg("Packing zip…");
+      downloadBlob(makeZip(entries), `${f.name}_editcamp.zip`);
+      bumpExports(entries.length);
+    } catch (ex) {
+      setErr("Batch export failed: " + (ex && ex.message ? ex.message : String(ex)));
+    }
+    setBusyMsg(null);
+    setProgress(null);
+  };
+
+  /* lazy thumbnails: generate only for cards scrolled into view */
+  useEffect(() => {
+    if (!galleryOpen || !folder || !galleryGridRef.current) return;
+    const started = new Set();
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const en of entries) {
+          if (!en.isIntersecting) continue;
+          const id = Number(en.target.dataset.pid);
+          io.unobserve(en.target);
+          if (started.has(id)) continue;
+          started.add(id);
+          setThumbs((prev) => (prev[id] !== undefined ? prev : { ...prev, [id]: "pending" }));
+          const photo = folder.photos[id];
+          thumbQueueRef.current.enqueue(photo).then((url) => {
+            setThumbs((prev) => {
+              if (prev[id] && prev[id] !== "pending") return prev;
+              return { ...prev, [id]: url || "failed" };
+            });
+          });
+        }
+      },
+      { root: galleryGridRef.current, rootMargin: "300px" }
+    );
+    galleryGridRef.current.querySelectorAll("[data-pid]").forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, [galleryOpen, folder]);
+
+  /* share prompt: lifetime export count, shown only at milestones */
+  const bumpExports = (n) => {
+    try {
+      if (localStorage.getItem("ec_share_off") === "1") return;
+      const old = Number(localStorage.getItem("ec_export_count") || 0);
+      const count = old + n;
+      localStorage.setItem("ec_export_count", String(count));
+      /* lifetime count decides WHEN to show; the message shows only what
+         was just exported, so nobody thinks extra files went out */
+      const crossed = old === 0 || Math.floor(old / 5) < Math.floor(count / 5);
+      if (crossed) setShareToast({ count: n });
+    } catch (e) {
+      /* storage unavailable */
+    }
+  };
+
+  const doShare = async () => {
+    const url = "https://editcamp.net";
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "EditCamp",
+          text: "Free RAW photo editor that teaches you how to edit — runs entirely in your browser.",
+          url,
+        });
+        setShareToast(null);
+      } catch (e) {
+        /* user cancelled */
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(url);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 2500);
+      } catch (e) {
+        /* clipboard unavailable */
+      }
+    }
+  };
 
   /* ------------------------- colour picking ------------------------- */
 
@@ -1910,7 +2259,7 @@ export default function App() {
       <style>{CSS}</style>
 
       <header className="top">
-        <div className="brand" ref={brandRef}>
+        <div className="brand">
           <svg
             className="brand-logo"
             viewBox="0 0 20 20"
@@ -1932,7 +2281,50 @@ export default function App() {
           <span className="brand-name">EditCamp</span>
           <span className="brand-tag">RAW editing made easy</span>
         </div>
-        <div className="top-actions" ref={actionsRef}>
+        <div className="top-actions">
+          {imgInfo && (
+            <div className="menu-anchor">
+              <button
+                className={"btn ghost small" + (photoMenuOpen ? " active" : "")}
+                onClick={() => setPhotoMenuOpen((o) => !o)}
+              >
+                {folder ? "Gallery" : isNarrow ? "Change" : "Change photo"} {"▾"}
+              </button>
+              {photoMenuOpen && (
+                <div className="menu-pop">
+                  {folder && (
+                    <button
+                      className="menu-item"
+                      onClick={() => {
+                        setPhotoMenuOpen(false);
+                        storeCurrentEdits();
+                        setBatch(null);
+                        setGalleryOpen(true);
+                      }}
+                    >
+                      Open gallery
+                    </button>
+                  )}
+                  <label
+                    className="menu-item"
+                    htmlFor="sf-file"
+                    role="button"
+                    onClick={() => setTimeout(() => setPhotoMenuOpen(false), 50)}
+                  >
+                    Upload a photo
+                  </label>
+                  <label
+                    className="menu-item"
+                    htmlFor="sf-folder"
+                    role="button"
+                    onClick={() => setTimeout(() => setPhotoMenuOpen(false), 50)}
+                  >
+                    {folder ? "Open another folder" : "Open a folder"}
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
           {DONATE_URL && (
             <a
               className="btn ghost small support-btn"
@@ -1940,11 +2332,10 @@ export default function App() {
               target="_blank"
               rel="noopener noreferrer"
             >
-              <span className="support-heart">{"♥"}</span>
-              {!heartOnly && " Support"}
+              <span className="support-heart">{"♥"}</span> Support
             </a>
           )}
-          {imgInfo && (
+          {imgInfo && !galleryOpen && (
             <>
             <div className="export-anchor">
               <button
@@ -2024,16 +2415,6 @@ export default function App() {
                 </div>
               )}
             </div>
-            <label className="btn ghost small" htmlFor="sf-file" role="button" tabIndex={0}>
-              {isNarrow ? "Change" : "Change photo"}
-            </label>
-            <button
-              className="btn ghost small"
-              onClick={revertToOriginal}
-              disabled={!edited && masks.length === 0 && !cropApplied}
-            >
-              {isNarrow ? "Revert" : "Revert to original"}
-            </button>
             </>
           )}
         </div>
@@ -2041,6 +2422,14 @@ export default function App() {
 
       <input id="sf-file" type="file" accept={ACCEPT} onChange={onFile} className="vhide" />
       <input id="sf-edits" type="file" accept=".json,application/json" onChange={onLoadEdits} className="vhide" />
+      <input
+        id="sf-folder"
+        type="file"
+        multiple
+        onChange={onFolder}
+        className="vhide"
+        {...{ webkitdirectory: "", directory: "" }}
+      />
 
       {showPrivacy && (
         <div className="privacy-note">
@@ -2090,7 +2479,151 @@ export default function App() {
         </div>
       )}
 
-      {!imgInfo ? (
+      {shareToast && !busyMsg && (
+        <div className="share-overlay" onClick={() => setShareToast(null)}>
+          <div className="share-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="share-close" aria-label="Close" onClick={() => setShareToast(null)}>
+              {"×"}
+            </button>
+            <div className="share-emoji">{"🎉"}</div>
+            <div className="share-title">
+              {shareToast.count === 1
+                ? "You just exported 1 photo!"
+                : `You just exported ${shareToast.count} photos!`}
+            </div>
+            <div className="share-text">
+              EditCamp is free and always will be. If you find it useful,
+              sharing it with a friend helps a lot.
+            </div>
+            <div className="share-actions">
+              <button className="btn primary" onClick={doShare}>
+                {shareCopied ? "Link copied ✓" : "Share EditCamp"}
+              </button>
+              <button className="btn ghost" onClick={() => setShareToast(null)}>
+                Maybe later
+              </button>
+            </div>
+            <button
+              className="share-off"
+              onClick={() => {
+                try {
+                  localStorage.setItem("ec_share_off", "1");
+                } catch (e) { /* fine */ }
+                setShareToast(null);
+              }}
+            >
+              Don't show this again
+            </button>
+          </div>
+        </div>
+      )}
+
+      {galleryOpen && folder ? (
+        <div className="gallery">
+          <div className="gal-head">
+            <span className="gal-title">{folder.name}</span>
+            <span className="gal-count">
+              {editedIds.size} of {folder.photos.length} edited
+            </span>
+            <span className="gal-actions">
+              {batch === null && editedIds.size > 0 && folder.photos.length > 1 && (
+                <button className="btn small" onClick={() => setBatch({ stage: "source", mode: "apply" })}>
+                  Batch apply
+                </button>
+              )}
+              {batch === null && (
+                <button
+                  className="btn small"
+                  onClick={() => setBatch({ stage: "targets", mode: "export", targets: new Set() })}
+                >
+                  Batch export
+                </button>
+              )}
+              {batch === null && imgInfo && (
+                <button className="btn small primary" onClick={() => setGalleryOpen(false)}>
+                  Back to editor
+                </button>
+              )}
+              {batch === null && (
+                <button className="btn small ghost" onClick={closeFolder}>
+                  Close folder
+                </button>
+              )}
+              {batch !== null && (
+                <button className="btn small" onClick={() => setBatch(null)}>
+                  Cancel
+                </button>
+              )}
+              {batch && batch.stage === "targets" && batch.mode === "apply" && (
+                <>
+                  <button className="btn small" onClick={selectAllUnedited}>
+                    All unedited
+                  </button>
+                  <button
+                    className="btn small primary"
+                    disabled={!batch.targets.size}
+                    onClick={applyBatch}
+                  >
+                    Apply to {batch.targets.size}
+                  </button>
+                </>
+              )}
+              {batch && batch.stage === "targets" && batch.mode === "export" && (
+                <>
+                  <button className="btn small" onClick={selectAllEdited}>
+                    All edited
+                  </button>
+                  <button
+                    className="btn small primary"
+                    disabled={!batch.targets.size}
+                    onClick={runBatchExport}
+                  >
+                    Export {batch.targets.size}
+                  </button>
+                </>
+              )}
+            </span>
+          </div>
+          {err && <div className="err-banner in-stage">{err}</div>}
+          {batch && (
+            <div className="gal-instr">
+              {batch.stage === "source"
+                ? "Tap the edited photo whose edit you want to copy"
+                : batch.mode === "export"
+                ? "Tap photos to select them, then Export — edits are applied automatically"
+                : "Tap photos to select them, then Apply"}
+            </div>
+          )}
+          <div className="gal-grid" ref={galleryGridRef}>
+            {folder.photos.map((p) => {
+              const isEdited = editedIds.has(p.id);
+              const sel = batch && batch.stage === "targets" && batch.targets.has(p.id);
+              const url = thumbs[p.id];
+              const cls =
+                "gal-card" +
+                (isEdited ? " edited" : "") +
+                (p.id === currentPhotoId ? " cur" : "") +
+                (batch && batch.stage === "source" && !isEdited ? " dim" : "") +
+                (batch && batch.stage === "targets" && batch.mode === "apply" && p.id === batch.sourceId ? " src" : "") +
+                (sel ? " sel" : "");
+              return (
+                <button key={p.id} data-pid={p.id} className={cls} onClick={() => onCardClick(p.id)}>
+                  {url && url !== "pending" && url !== "failed" ? (
+                    <img src={url} alt={p.name} />
+                  ) : (
+                    <span className="gal-ph">{url === "failed" ? "No preview" : p.raw ? "RAW…" : "…"}</span>
+                  )}
+                  <span className="gal-name">{p.name}</span>
+                  {isEdited && <span className="gal-dot" aria-label="Edited" />}
+                  {batch && batch.stage === "targets" && !(batch.mode === "apply" && p.id === batch.sourceId) && (
+                    <span className={"gal-check" + (sel ? " on" : "")}>{"✓"}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : !imgInfo ? (
         <div className="empty">
           <div className="hero">
             <div className="hero-copy">
@@ -2102,6 +2635,9 @@ export default function App() {
               <div className="empty-actions">
                 <label className="btn primary" htmlFor="sf-file" role="button" tabIndex={0}>
                   Upload a photo
+                </label>
+                <label className="btn" htmlFor="sf-folder" role="button" tabIndex={0}>
+                  Open a folder
                 </label>
                 <button className="btn" onClick={useSample}>
                   Practice on the sample photo
@@ -2226,10 +2762,10 @@ export default function App() {
                 </span>
               ) : (
                 <span className="meta-line">
-                  {formatMeta(meta)}
-                  {meta && imgInfo ? " · " : ""}
-                  {imgInfo ? `${imgInfo.w}×${imgInfo.h}` : ""}
-                </span>
+                {formatMeta(meta)}
+                {meta && imgInfo ? " · " : ""}
+                {imgInfo ? `${imgInfo.w}×${imgInfo.h}` : ""}
+              </span>
               )}
             </div>
 
@@ -2835,6 +3371,186 @@ input[type=range]:focus-visible, .sl-value:focus-visible, .split-handle:focus-vi
 .privacy-text { flex: 1; min-width: 240px; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
 .privacy-actions { display: flex; gap: 8px; }
 
+.meta-mini {
+  position: relative;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.info-btn {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; font-style: italic;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0;
+}
+.info-btn.on { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
+.info-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 11px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: normal;
+  width: max-content;
+  max-width: 240px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+}
+
+.gallery { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.gal-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.gal-title { font-weight: 600; font-size: 15px; }
+.gal-count {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; color: var(--muted);
+}
+.gal-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.gal-instr {
+  padding: 10px 16px;
+  background: var(--amber-soft);
+  border-bottom: 1px solid rgba(232,163,61,0.3);
+  font-size: 13px;
+}
+.gal-grid {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-auto-rows: 140px;
+  gap: 10px;
+  padding: 14px 16px;
+  align-content: start;
+}
+.gal-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--panel-2);
+  cursor: pointer;
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.gal-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gal-card.edited { border-color: rgba(232,163,61,0.55); }
+.gal-card.cur { outline: 2px solid var(--amber); outline-offset: 1px; }
+.gal-card.sel { outline: 2px solid var(--amber); outline-offset: 1px; }
+.gal-card.src { outline: 2px dashed var(--amber); outline-offset: 1px; }
+.gal-card.dim { opacity: 0.35; pointer-events: none; }
+.gal-card:hover { border-color: var(--amber); }
+.gal-ph {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; color: var(--muted);
+}
+.gal-name {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  padding: 3px 7px;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gal-dot {
+  position: absolute; top: 8px; right: 8px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 6px rgba(0,0,0,0.6);
+}
+.gal-check {
+  position: absolute; top: 6px; left: 6px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  color: transparent;
+  border: 1.5px solid rgba(255,255,255,0.8);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px;
+}
+.gal-check.on { background: var(--amber); color: #1a1408; border-color: var(--amber); }
+
+.share-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.share-modal {
+  position: relative;
+  max-width: 400px;
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px 24px 20px;
+  box-shadow: 0 16px 60px rgba(0,0,0,0.6);
+  text-align: center;
+}
+.share-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.share-close:hover { color: var(--text); }
+.share-emoji { font-size: 34px; margin-bottom: 8px; }
+.share-title { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
+.share-text {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+.share-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.share-actions .btn { min-width: 130px; }
+.share-off {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  font-family: inherit;
+}
+.share-off:hover { color: var(--text); }
+
 .busy-overlay {
   position: fixed; inset: 0; z-index: 50;
   background: rgba(10, 10, 12, 0.72);
@@ -2960,47 +3676,6 @@ input[type=range]:focus-visible, .sl-value:focus-visible, .split-handle:focus-vi
   font-family: 'IBM Plex Mono', monospace;
   font-size: 11px; color: var(--muted);
   margin-left: auto;
-}
-.meta-mini {
-  position: relative;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 10.5px;
-  color: var(--muted);
-}
-.info-btn {
-  width: 20px; height: 20px;
-  border-radius: 50%;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 11px; font-style: italic;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center;
-  padding: 0;
-}
-.info-btn.on { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
-.info-pop {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 30;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 11px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text);
-  white-space: normal;
-  width: max-content;
-  max-width: 240px;
-  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
 }
 .stage-inner {
   flex: 1;
@@ -3310,6 +3985,36 @@ input.hue::-moz-range-track {
 .ess { display: flex; flex-direction: column; }
 .auto-btn { margin: 0 0 16px; }
 
+.menu-anchor { position: relative; }
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  min-width: 176px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.menu-item {
+  display: block;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.menu-item:hover { background: var(--panel-2); color: var(--amber); }
+
 .support-btn { text-decoration: none; color: var(--muted); }
 .support-btn:hover { color: var(--text); }
 .support-heart { color: var(--amber); margin-right: 2px; }
@@ -3466,6 +4171,7 @@ input.hue::-moz-range-track {
   }
   .canvas { max-height: 40vh; }
   .export-panel { right: auto; left: 0; }
+  .gal-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); grid-auto-rows: 104px; gap: 8px; padding: 10px 12px; }
 }
 
 @media (max-width: 980px) {
@@ -3476,8 +4182,6 @@ input.hue::-moz-range-track {
   .empty-actions { justify-content: center; }
   .hero-demo { width: 100%; }
 }
-
-
 
 @media (max-width: 480px) {
   .empty { padding: 16px; }
