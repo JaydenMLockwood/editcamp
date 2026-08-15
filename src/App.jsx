@@ -1521,7 +1521,7 @@ export default function App() {
       /* choose temp/tint that make the sampled patch neutral */
       const t = ((c.b - c.r) / 0.24) * 100;
       const target = (c.r + c.b) / 2;
-      const ti = ((target - c.g) / 0.10) * 100;
+      const ti = ((c.g - target) / 0.10) * 100;
       setAdj((prev) => ({
         ...prev,
         temperature: Math.round(Math.max(-100, Math.min(100, t))),
@@ -2332,7 +2332,8 @@ export default function App() {
               target="_blank"
               rel="noopener noreferrer"
             >
-              <span className="support-heart">{"♥"}</span> Support
+              <span className="support-heart">{"♥"}</span>
+              {!isNarrow && " Support"}
             </a>
           )}
           {imgInfo && !galleryOpen && (
@@ -4172,6 +4173,7 @@ input.hue::-moz-range-track {
   .canvas { max-height: 40vh; }
   .export-panel { right: auto; left: 0; }
   .gal-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); grid-auto-rows: 104px; gap: 8px; padding: 10px 12px; }
+  .menu-pop { right: auto; left: 0; max-width: calc(100vw - 24px); }
 }
 
 @media (max-width: 980px) {

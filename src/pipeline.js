@@ -119,7 +119,8 @@ void main() {
   /* white balance */
   c.r += u_temp * 0.12;
   c.b -= u_temp * 0.12;
-  c.g += u_tint * 0.10;
+  /* Lightroom convention: positive tint = magenta (less green) */
+  c.g -= u_tint * 0.10;
 
   /* exposure (stops) */
   c *= pow(2.0, u_exp);
